@@ -27,6 +27,7 @@ from logic import (
     gemini_read_selected_papers,
     generate_full_draft,
     generate_search_queries,
+    include_in_final_references,
     load_writing_style_contract,
     merge_search_results,
     recommend_writing_style,
@@ -788,7 +789,14 @@ with tabs[2]:
 
             with st.expander("APA 7 reference preview", expanded=False):
                 for paper in st.session_state.get("selected_papers", []):
-                    st.write(format_apa_reference(paper))
+                    if include_in_final_references(paper):
+                        st.write(format_apa_reference(paper))
+                skipped_theses = [
+                    paper for paper in st.session_state.get("selected_papers", [])
+                    if (paper.get("category") == "Thesis" and not include_in_final_references(paper))
+                ]
+                if skipped_theses:
+                    st.caption(f"{len(skipped_theses)} thesis source(s) are used for RoL/reference mining only and are not shown as final citations.")
 
 
 with tabs[3]:
@@ -854,6 +862,12 @@ with tabs[3]:
             if thesis_leads:
                 with st.expander("Useful references found inside theses", expanded=True):
                     for lead in thesis_leads[:30]:
+                        st.write(lead)
+
+            primary_leads = recommendations.get("thesis_primary_study_leads") or []
+            if primary_leads:
+                with st.expander("Primary-study leads extracted from thesis RoL", expanded=True):
+                    for lead in primary_leads[:30]:
                         st.write(lead)
 
             gaps = recommendations.get("coverage_gaps") or []

@@ -2379,6 +2379,14 @@ def format_apa_reference(paper: dict[str, Any]) -> str:
     return re.sub(r"\s+", " ", reference).strip()
 
 
+def include_in_final_references(paper: dict[str, Any]) -> bool:
+    category = paper.get("category") or infer_paper_category(paper)
+    if category != "Thesis":
+        return True
+    note = paper.get("gemini_note") or {}
+    return bool(note.get("cite_thesis_directly") or paper.get("cite_thesis_directly"))
+
+
 def gemini_generate_text(api_key: str, model: str, prompt: str, temperature: float = 0.2) -> str:
     if not api_key:
         return ""
@@ -2434,10 +2442,11 @@ def extract_references_section(text: str, limit: int = 14000) -> str:
 
 
 def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: str = "not_read") -> dict[str, Any]:
+    category = paper.get("category") or infer_paper_category(paper)
     return {
         "citation": citation_key(paper),
         "title": paper.get("title") or "",
-        "category": paper.get("category") or infer_paper_category(paper),
+        "category": category,
         "evidence_source": evidence_source,
         "overall_relevance": paper.get("score", 0),
         "why_relevant": paper.get("score_reason", ""),
@@ -2447,6 +2456,10 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "review_of_literature_notes": "",
         "reference_list_notes": "",
         "most_useful_references": [],
+        "rol_primary_studies": [],
+        "primary_study_leads": [],
+        "thesis_citation_policy": "do_not_cite_thesis_directly" if category == "Thesis" else "",
+        "cite_thesis_directly": False,
         "usable_citation_sentences": [],
         "shelton_style_use": "",
         "selected_style_use": "",
@@ -2508,12 +2521,22 @@ Selected author writing-style contract to keep in view while reading:
 Return only a JSON object with these keys:
 citation, title, category, evidence_source, overall_relevance, why_relevant,
 methodology_links, result_links, discussion_points, review_of_literature_notes,
-reference_list_notes, most_useful_references, usable_citation_sentences,
+reference_list_notes, most_useful_references, rol_primary_studies, primary_study_leads,
+thesis_citation_policy, cite_thesis_directly, usable_citation_sentences,
 shelton_style_use, selected_style_use, missing_evidence_or_data.
 
-For theses, review_of_literature_notes must summarize relevant review-of-literature support, and
-most_useful_references must list any reference entries from the thesis bibliography that look closely
-related to the current study. For non-thesis papers, keep thesis-only fields empty if not applicable.
+For theses:
+- Treat the thesis as a source-mining document, not as a final citation.
+- Focus on the Review of Literature section, especially chronological author-year evidence.
+- Extract original primary studies from the RoL that match the current crop/host/pest/problem, objective,
+  treatment/methodology, result pattern, location/weather context, or discussion need.
+- rol_primary_studies must be an array of objects with author_year, objective_or_topic, crop_pest_context,
+  method_or_treatment, key_result, why_it_matches, bibliography_entry_if_found, and search_query_to_find_primary_paper.
+- primary_study_leads must list concise author-year-title/search leads for finding the original papers again.
+- most_useful_references must list primary-source bibliography entries from the thesis bibliography, not the thesis itself.
+- thesis_citation_policy must be "do_not_cite_thesis_directly" unless the thesis contains unique primary data that must be cited.
+- cite_thesis_directly must be false unless direct thesis citation is unavoidable and you explain why in why_relevant.
+For non-thesis papers, keep thesis-only fields empty if not applicable.
 In shelton_style_use and selected_style_use, explain exactly how this evidence should be used in the selected author-style introduction,
 methods justification, results support, or discussion comparison.
 In missing_evidence_or_data, name extra papers, variables, statistics, or data details that would make the
@@ -2548,11 +2571,14 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
     best = []
     for paper in sorted(papers, key=lambda item: item.get("score", 0), reverse=True):
         note = paper.get("gemini_note") or {}
+        category = paper.get("category") or infer_paper_category(paper)
+        if category == "Thesis" and not bool(note.get("cite_thesis_directly")):
+            continue
         best.append(
             {
                 "citation": citation_key(paper),
                 "title": paper.get("title", ""),
-                "category": paper.get("category") or infer_paper_category(paper),
+                "category": category,
                 "why_to_use": note.get("why_relevant") or paper.get("score_reason", ""),
                 "where_to_use": "Introduction or Discussion",
             }
@@ -2561,9 +2587,11 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
     for paper in papers:
         note = paper.get("gemini_note") or {}
         thesis_leads.extend(note.get("most_useful_references") or [])
+        thesis_leads.extend(note.get("primary_study_leads") or [])
     return {
         "best_references": best[:12],
         "thesis_reference_leads": thesis_leads[:20],
+        "thesis_primary_study_leads": thesis_leads[:20],
         "review_paper_to_use": next((item for item in best if item.get("category") == "Review Paper"), {}),
         "coverage_gaps": [],
         "shelton_style_plan": [],
@@ -2584,11 +2612,13 @@ def summarize_gemini_reference_notes(
         return fallback
     compact_notes = []
     for paper in papers:
+        category = paper.get("category") or infer_paper_category(paper)
         compact_notes.append(
             {
                 "citation": citation_key(paper),
                 "title": paper.get("title"),
-                "category": paper.get("category") or infer_paper_category(paper),
+                "category": category,
+                "citation_policy": "source_mining_only_do_not_cite_thesis" if category == "Thesis" else "cite_if_relevant",
                 "score": paper.get("score"),
                 "reference": format_apa_reference(paper),
                 "gemini_note": paper.get("gemini_note") or {},
@@ -2598,6 +2628,12 @@ def summarize_gemini_reference_notes(
 Use these Gemini reading notes to choose the most relatable references for the user's research paper.
 Give priority to sources that directly match the methodology, result pattern, crop/host/pest/problem,
 treatments, location/weather context, or discussion interpretation.
+
+Critical thesis rule:
+- Indian theses, including KrishiKosh theses, are source-mining documents here.
+- Do not recommend citing a thesis itself unless it contains unique primary data and cite_thesis_directly is true.
+- Use thesis RoL notes to identify original primary studies, then put those original studies in
+  thesis_primary_study_leads and suggested_search_queries so they can be found and cited as primary sources.
 
 Research context:
 {truncate_text(context_text, 7000)}
@@ -2611,6 +2647,7 @@ Reading notes:
 Return only a JSON object with keys:
 best_references: array of objects with citation, title, category, why_to_use, where_to_use;
 thesis_reference_leads: array of bibliography entries or source leads found inside thesis references;
+thesis_primary_study_leads: array of primary author-year study leads extracted from thesis RoL;
 review_paper_to_use: object with citation, title, why_to_use;
 coverage_gaps: array of missing literature topics still worth searching;
 shelton_style_plan: array of concrete instructions for writing this paper in the selected author style;
@@ -2674,6 +2711,8 @@ suggested_search_queries: 4 to 8 precise scholarly queries for missing research/
 needed_data_checks: concrete missing data/statistical/method details the user should provide if available;
 why_needed: brief reasons tied to the selected style contract;
 style_plan: ordered plan for introduction, methods, results, discussion, abstract, conclusion.
+When thesis RoL primary-study leads are present, turn the best author-year/title leads into search queries
+for the original papers. Do not plan to cite the thesis itself unless cite_thesis_directly is true.
 Do not ask for unnecessary information. Only suggest what would materially improve the paper.
 """
     if gemini_key:
@@ -2869,17 +2908,22 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16) -> str:
     for paper in papers[:limit]:
         full_text = paper.get("full_text") or ""
         gemini_note = paper.get("gemini_note") or {}
+        category = paper.get("category") or infer_paper_category(paper)
+        direct_citation_allowed = category != "Thesis" or bool(gemini_note.get("cite_thesis_directly"))
         rows.append(
             {
-                "citation": citation_key(paper),
+                "citation": citation_key(paper) if direct_citation_allowed else "THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY",
+                "source_id": citation_key(paper),
+                "direct_citation_allowed": direct_citation_allowed,
+                "thesis_use_policy": gemini_note.get("thesis_citation_policy") if category == "Thesis" else "",
                 "title": paper.get("title"),
                 "authors": paper.get("authors"),
                 "year": paper.get("year"),
                 "abstract": truncate_text(paper.get("abstract", ""), 800),
-                "full_text_excerpt": truncate_text(full_text, 1800),
+                "full_text_excerpt": "" if category == "Thesis" and not direct_citation_allowed else truncate_text(full_text, 1800),
                 "download_method": paper.get("download_method", ""),
                 "full_text_chars": paper.get("full_text_chars", 0),
-                "category": paper.get("category") or infer_paper_category(paper),
+                "category": category,
                 "score": paper.get("score"),
                 "reason": paper.get("score_reason"),
                 "gemini_note": {
@@ -2890,6 +2934,8 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16) -> str:
                     "discussion_points": gemini_note.get("discussion_points", [])[:6],
                     "review_of_literature_notes": truncate_text(gemini_note.get("review_of_literature_notes", ""), 900),
                     "most_useful_references": gemini_note.get("most_useful_references", [])[:8],
+                    "rol_primary_studies": gemini_note.get("rol_primary_studies", [])[:10],
+                    "primary_study_leads": gemini_note.get("primary_study_leads", [])[:10],
                     "selected_style_use": truncate_text(gemini_note.get("selected_style_use") or gemini_note.get("shelton_style_use", ""), 900),
                     "missing_evidence_or_data": gemini_note.get("missing_evidence_or_data", [])[:8],
                 },
@@ -3017,6 +3063,9 @@ Selected references allowed for citation:
 Rules:
 - Interpret the supplied results and compare them with selected references only.
 - Prefer Gemini reading notes and downloaded full_text_excerpt evidence where available; use abstracts only when full text was not downloaded/read.
+- Thesis entries marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY are not allowed citations.
+- Use thesis RoL notes only to understand which original primary studies should be searched/selected; cite only
+  original primary papers or review papers that are present as directly citable selected references.
 - Use APA in-text citations exactly like the provided citation strings.
 - Use phrases such as "These findings are in agreement with..." only when a selected reference supports it.
 - Do not invent author names, years, or references.
@@ -3057,7 +3106,10 @@ Rules:
 - Explain pest/pathogen/problem severity.
 - Identify the knowledge gap or need for the study.
 - End with a clear objective sentence.
-- Prefer review-paper and thesis review-of-literature notes where available.
+- Prefer review-paper evidence and thesis review-of-literature notes for locating original studies.
+- Do not cite theses marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY; cite only directly citable selected
+  primary papers or review papers. If a useful study appears only as a thesis RoL lead, mention it as a search need,
+  not as a citation.
 - Cite only selected references. Do not invent citations.
 
 {common}
@@ -3177,7 +3229,7 @@ def generate_full_draft(
     conclusion = write_conclusion(api_key, model, common, styles, results, discussion)
     introduction = write_introduction(api_key, model, common, styles, selected_papers)
     abstract = write_abstract(api_key, model, common, styles, methodology, results, conclusion)
-    references = [format_apa_reference(paper) for paper in selected_papers]
+    references = [format_apa_reference(paper) for paper in selected_papers if include_in_final_references(paper)]
 
     return {
         "title": title,
