@@ -44,6 +44,7 @@ MIN_REVIEW_PAPERS = 1
 MIN_REFERENCE_COUNT = MIN_RESEARCH_ARTICLES + MIN_THESES + MIN_REVIEW_PAPERS
 DEFAULT_PERPLEXITY_MODEL = "sonar-pro"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 DEFAULT_SHELTON_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Anthony M. Shelton.docx")
 DEFAULT_GURR_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Gurr's Style.docx")
 DISCUSSION_WORKFLOW_TEXT = """Results-first discussion workflow:
@@ -280,6 +281,39 @@ def chat_text(
         kwargs["response_format"] = response_format
     response = client.chat.completions.create(**kwargs)
     return response.choices[0].message.content or ""
+
+
+def claude_text(
+    api_key: str,
+    model: str,
+    system: str,
+    user: str,
+    temperature: float = 0.2,
+    max_tokens: int = 5000,
+) -> str:
+    if not api_key:
+        return ""
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model or DEFAULT_CLAUDE_MODEL,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        },
+        timeout=180,
+        verify=SSL_VERIFY,
+    )
+    response.raise_for_status()
+    data = response.json()
+    parts = data.get("content") or []
+    return "\n".join(str(part.get("text") or "") for part in parts if part.get("type") == "text").strip()
 
 
 def parse_json_object(text: str, fallback: dict[str, Any]) -> dict[str, Any]:
@@ -3244,6 +3278,8 @@ def build_discussion_framework(
     analysis: dict[str, Any],
     selected_papers: list[dict[str, Any]],
     results_section: str,
+    claude_key: str = "",
+    claude_model: str = DEFAULT_CLAUDE_MODEL,
 ) -> dict[str, Any]:
     fallback = {
         "style_priority": "Use the selected author's academic framing and validation rhetoric before basic reporting.",
@@ -3256,7 +3292,7 @@ def build_discussion_framework(
         ],
         "workflow": DISCUSSION_WORKFLOW_TEXT,
     }
-    if not api_key:
+    if not (api_key or claude_key):
         return fallback
 
     prompt = f"""
@@ -3303,11 +3339,33 @@ Rules:
 - Make the plan style-led: the rhetorical move should be more than "report finding"; it should frame, validate,
   reconcile, qualify, or extend the finding through related work.
 """
+    system_prompt = "You plan style-led scientific Discussion sections from results and literature evidence."
+    if claude_key:
+        try:
+            text = claude_text(
+                claude_key,
+                claude_model,
+                system_prompt,
+                prompt,
+                temperature=0.1,
+                max_tokens=5000,
+            )
+            parsed = parse_json_object(text, fallback)
+            for key, value in fallback.items():
+                parsed.setdefault(key, value)
+            parsed["framework_model"] = claude_model or DEFAULT_CLAUDE_MODEL
+            parsed["framework_provider"] = "Claude"
+            return parsed
+        except Exception as exc:
+            fallback["claude_framework_error"] = str(exc)
+            if not api_key:
+                return fallback
+
     try:
         text = chat_text(
             api_key,
             model,
-            "You plan style-led scientific Discussion sections from results and literature evidence.",
+            system_prompt,
             prompt,
             temperature=0.1,
             response_format={"type": "json_object"},
@@ -3315,6 +3373,8 @@ Rules:
         parsed = parse_json_object(text, fallback)
         for key, value in fallback.items():
             parsed.setdefault(key, value)
+        parsed.setdefault("framework_model", model)
+        parsed.setdefault("framework_provider", "OpenAI")
         return parsed
     except Exception:
         return fallback
@@ -3328,6 +3388,8 @@ def write_discussion(
     selected_papers: list[dict[str, Any]],
     results_section: str,
     discussion_framework: dict[str, Any] | None = None,
+    claude_key: str = "",
+    claude_model: str = DEFAULT_CLAUDE_MODEL,
 ) -> str:
     prompt = f"""
 Write the Discussion section.
@@ -3371,7 +3433,21 @@ Rules:
 Results section already drafted:
 {truncate_text(results_section, 7000)}
 """
-    return chat_text(api_key, model, "You write discussion sections with careful literature comparison.", prompt, temperature=0.25)
+    system_prompt = "You write discussion sections with careful literature comparison, strong logic, and style-led rhetoric."
+    if claude_key:
+        try:
+            return claude_text(
+                claude_key,
+                claude_model,
+                system_prompt,
+                prompt,
+                temperature=0.2,
+                max_tokens=7000,
+            )
+        except Exception:
+            if not api_key:
+                raise
+    return chat_text(api_key, model, system_prompt, prompt, temperature=0.25)
 
 
 def write_introduction(
@@ -3490,6 +3566,8 @@ Conclusion:
 def generate_full_draft(
     api_key: str,
     model: str,
+    claude_key: str,
+    claude_model: str,
     paper_title: str,
     authors: str,
     affiliation: str,
@@ -3522,8 +3600,28 @@ def generate_full_draft(
 
     methodology = write_methodology(api_key, model, common, raw_methodology, styles)
     results = write_results(api_key, model, common, styles, table_summaries, image_summaries)
-    discussion_framework = build_discussion_framework(api_key, model, common, styles, analysis, selected_papers, results)
-    discussion = write_discussion(api_key, model, common, styles, selected_papers, results, discussion_framework)
+    discussion_framework = build_discussion_framework(
+        api_key,
+        model,
+        common,
+        styles,
+        analysis,
+        selected_papers,
+        results,
+        claude_key=claude_key,
+        claude_model=claude_model,
+    )
+    discussion = write_discussion(
+        api_key,
+        model,
+        common,
+        styles,
+        selected_papers,
+        results,
+        discussion_framework,
+        claude_key=claude_key,
+        claude_model=claude_model,
+    )
     conclusion = write_conclusion(api_key, model, common, styles, results, discussion)
     introduction = write_introduction(api_key, model, common, styles, selected_papers)
     abstract = write_abstract(api_key, model, common, styles, methodology, results, conclusion)
@@ -3539,6 +3637,8 @@ def generate_full_draft(
         "results": results,
         "discussion_framework": discussion_framework,
         "discussion": discussion,
+        "discussion_provider": "Claude" if claude_key else "OpenAI",
+        "discussion_model": (claude_model or DEFAULT_CLAUDE_MODEL) if claude_key else model,
         "conclusion": conclusion,
         "references": references,
         "analysis": analysis,

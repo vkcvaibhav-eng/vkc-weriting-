@@ -12,6 +12,7 @@ importlib.reload(logic_module)
 
 from logic import (
     DISCUSSION_WORKFLOW_TEXT,
+    DEFAULT_CLAUDE_MODEL,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_PERPLEXITY_MODEL,
     DEFAULT_SHELTON_STYLE_PATH,
@@ -97,6 +98,18 @@ API_SECRET_NAMES = {
         "gemini.key",
         "gemini.api_key",
     ),
+    "claude_key": (
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_API_KEY",
+        "ANTHROPIC_KEY",
+        "CLAUDE_KEY",
+        "anthropic_api_key",
+        "claude_api_key",
+        "anthropic.key",
+        "anthropic.api_key",
+        "claude.key",
+        "claude.api_key",
+    ),
 }
 
 API_SECRETS_TEMPLATE = """OPENAI_API_KEY = "your-openai-key"
@@ -105,6 +118,7 @@ SEMANTIC_SCHOLAR_API_KEY = "your-semantic-scholar-key"
 CORE_API_KEY = "your-core-key"
 PERPLEXITY_API_KEY = "your-perplexity-key"
 GEMINI_API_KEY = "your-gemini-key"
+ANTHROPIC_API_KEY = "your-claude-key"
 """
 
 
@@ -164,6 +178,8 @@ def init_state() -> None:
         "perplexity_model": DEFAULT_PERPLEXITY_MODEL,
         "gemini_key": "",
         "gemini_model": DEFAULT_GEMINI_MODEL,
+        "claude_key": "",
+        "claude_model": DEFAULT_CLAUDE_MODEL,
         "model": "gpt-4o-mini",
         "manual_api_key_override": False,
         "reference_count": MIN_REFERENCE_COUNT,
@@ -306,6 +322,12 @@ with st.sidebar:
     st.session_state.perplexity_model = st.text_input("Perplexity model", value=st.session_state.perplexity_model)
     configure_api_key("Google Gemini API key", "gemini_key")
     st.session_state.gemini_model = st.text_input("Gemini model", value=st.session_state.gemini_model)
+
+    st.divider()
+    st.subheader("Premium Discussion")
+    configure_api_key("Claude / Anthropic API key", "claude_key")
+    st.session_state.claude_model = st.text_input("Claude discussion model", value=st.session_state.claude_model)
+    st.caption("Claude is used for the Discussion framework and Discussion section when this key is available.")
 
     with st.expander("Streamlit secrets template"):
         st.code(API_SECRETS_TEMPLATE, language="toml")
@@ -1110,6 +1132,9 @@ with tabs[4]:
     cols[2].metric("Gemini-read", len([p for p in selected_papers if p.get("gemini_note")]))
     cols[3].metric("Tables", len(collect_tables(extracted_files)))
     cols[4].metric("Graphs", len(collect_images(extracted_files)))
+    st.caption(
+        f"Discussion engine: {'Claude ' + st.session_state.claude_model if st.session_state.claude_key else 'OpenAI ' + st.session_state.model}"
+    )
 
     with st.expander("Results-first discussion framework", expanded=False):
         st.markdown(DISCUSSION_WORKFLOW_TEXT)
@@ -1134,6 +1159,8 @@ with tabs[4]:
                     draft = generate_full_draft(
                         api_key=st.session_state.openai_key,
                         model=st.session_state.model,
+                        claude_key=st.session_state.claude_key,
+                        claude_model=st.session_state.claude_model,
                         paper_title=inputs["paper_title"],
                         authors=inputs["authors"],
                         affiliation=inputs["affiliation"],
@@ -1155,6 +1182,8 @@ with tabs[4]:
         st.markdown(f"### {draft.get('title', 'Research Paper Draft')}")
         if draft.get("authors"):
             st.caption(draft["authors"])
+        if draft.get("discussion_model"):
+            st.caption(f"Discussion written with {draft.get('discussion_provider', 'LLM')}: {draft['discussion_model']}")
         section_map = [
             ("Abstract", "abstract"),
             ("Introduction", "introduction"),
