@@ -644,6 +644,20 @@ with tabs[2]:
                 st.code(query, language="text")
 
     search_result = st.session_state.get("paper_search") or {}
+    deep_queries = search_result.get("deep_queries") or {}
+    if deep_queries:
+        with st.expander("Independent agri deep-search queries", expanded=False):
+            for label, key in [
+                ("Journal/research article", "journal_queries"),
+                ("Thesis/dissertation", "thesis_queries"),
+                ("Review paper", "review_queries"),
+            ]:
+                queries_for_layer = deep_queries.get(key) or []
+                if queries_for_layer:
+                    st.markdown(f"**{label}**")
+                    for query in queries_for_layer:
+                        st.code(query, language="text")
+
     warnings = search_result.get("warnings", [])
     if warnings:
         with st.expander("Search warnings", expanded=False):

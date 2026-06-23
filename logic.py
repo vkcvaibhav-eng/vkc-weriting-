@@ -1693,6 +1693,115 @@ def select_ranked_papers_with_targets(
     }
 
 
+def unique_query_list(queries: list[str], limit: int) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        value = re.sub(r"\s+", " ", str(query or "")).strip()
+        key = value.lower()
+        if value and key not in seen:
+            cleaned.append(value)
+            seen.add(key)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def query_items(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item or "").strip()]
+    return []
+
+
+def build_agri_deep_search_queries(
+    base_queries: list[str],
+    context_text: str,
+    openai_key: str = "",
+    model: str = "gpt-4o-mini",
+    max_journal_queries: int = 4,
+    max_thesis_queries: int = 5,
+    max_review_queries: int = 3,
+) -> dict[str, list[str]]:
+    keywords = fallback_keywords(context_text)
+    seed = " ".join(keywords[:6]) or "agricultural field study"
+    fallback = {
+        "journal_queries": unique_query_list(
+            list(base_queries)
+            + [
+                f"{seed} field experiment treatment efficacy",
+                f"{seed} population dynamics integrated pest management",
+            ],
+            max_journal_queries,
+        ),
+        "thesis_queries": unique_query_list(
+            [
+                f"{seed} thesis dissertation agricultural university",
+                f"{seed} KrishiKosh Shodhganga thesis",
+                f"{seed} MSc PhD thesis pest management",
+                f"{seed} Indian agricultural university dissertation",
+            ]
+            + [f"{query} thesis dissertation KrishiKosh Shodhganga" for query in base_queries],
+            max_thesis_queries,
+        ),
+        "review_queries": unique_query_list(
+            [
+                f"{seed} review paper",
+                f"{seed} systematic review",
+                f"{seed} integrated pest management review",
+            ]
+            + [f"{query} review paper" for query in base_queries],
+            max_review_queries,
+        ),
+    }
+    if not openai_key:
+        return fallback
+
+    prompt = f"""
+Generate independent search-query layers for an agricultural research-paper evidence search.
+
+Research context:
+{truncate_text(context_text, 9000)}
+
+Base queries:
+{json.dumps(base_queries, ensure_ascii=True)}
+
+Return only a JSON object with:
+journal_queries: {max_journal_queries} technical queries for journal/research articles;
+thesis_queries: {max_thesis_queries} broad thesis/dissertation queries for Indian agricultural university sources, KrishiKosh, Shodhganga, and related repositories;
+review_queries: {max_review_queries} queries for review papers.
+
+Do not include site: operators. Keep each query short and searchable.
+"""
+    try:
+        text = chat_text(
+            openai_key,
+            model,
+            "You create independent scholarly search layers for agricultural research evidence.",
+            prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        parsed = parse_json_object(text, {})
+        return {
+            "journal_queries": unique_query_list(
+                [*query_items(parsed.get("journal_queries")), *fallback["journal_queries"]],
+                max_journal_queries,
+            ),
+            "thesis_queries": unique_query_list(
+                [*query_items(parsed.get("thesis_queries")), *fallback["thesis_queries"]],
+                max_thesis_queries,
+            ),
+            "review_queries": unique_query_list(
+                [*query_items(parsed.get("review_queries")), *fallback["review_queries"]],
+                max_review_queries,
+            ),
+        }
+    except Exception:
+        return fallback
+
+
 def search_and_rank_papers(
     queries: list[str],
     context_text: str,
@@ -1796,6 +1905,80 @@ def search_and_rank_papers(
                 except Exception as exc:
                     warnings.append(f"Perplexity thesis search failed for '{query}': {exc}")
 
+    deep_queries = build_agri_deep_search_queries(
+        queries,
+        context_text,
+        openai_key=openai_key,
+        model=model,
+        max_journal_queries=4,
+        max_thesis_queries=5,
+        max_review_queries=3,
+    )
+    for query in deep_queries.get("journal_queries", []):
+        try:
+            all_papers.extend(search_semantic_scholar(query, semantic_key, max(5, per_query_limit)))
+        except Exception as exc:
+            warnings.append(f"Deep Semantic Scholar layer failed for '{query}': {exc}")
+        try:
+            all_papers.extend(search_openalex(query, max(5, per_query_limit)))
+        except Exception as exc:
+            warnings.append(f"Deep OpenAlex layer failed for '{query}': {exc}")
+        if serpapi_key:
+            try:
+                all_papers.extend(search_serpapi_google_scholar(query, serpapi_key, max(5, per_query_limit)))
+            except Exception as exc:
+                warnings.append(f"Deep Google Scholar layer failed for '{query}': {exc}")
+
+    if serpapi_key:
+        for query in deep_queries.get("thesis_queries", []):
+            try:
+                all_papers.extend(search_krishikosh_layer(query, serpapi_key, max(4, per_query_limit // 2)))
+            except Exception as exc:
+                warnings.append(f"Deep KrishiKosh thesis layer failed for '{query}': {exc}")
+            try:
+                all_papers.extend(search_serpapi_thesis_layer(query, serpapi_key, max(4, per_query_limit // 2)))
+            except Exception as exc:
+                warnings.append(f"Deep thesis repository layer failed for '{query}': {exc}")
+        for query in deep_queries.get("review_queries", []):
+            try:
+                all_papers.extend(search_serpapi_review_layer(query, serpapi_key, max(4, per_query_limit // 2)))
+            except Exception as exc:
+                warnings.append(f"Deep review Scholar layer failed for '{query}': {exc}")
+            try:
+                all_papers.extend(search_researchgate_layer(query, serpapi_key, max(3, per_query_limit // 2), "Review Paper"))
+            except Exception as exc:
+                warnings.append(f"Deep ResearchGate review layer failed for '{query}': {exc}")
+
+    if perplexity_key:
+        for query in deep_queries.get("review_queries", []):
+            try:
+                all_papers.extend(
+                    search_perplexity_sonar(
+                        query,
+                        perplexity_key,
+                        perplexity_model,
+                        context_text,
+                        max(3, per_query_limit // 2),
+                        category_hint="Review Paper",
+                    )
+                )
+            except Exception as exc:
+                warnings.append(f"Deep Perplexity review layer failed for '{query}': {exc}")
+        for query in deep_queries.get("thesis_queries", []):
+            try:
+                all_papers.extend(
+                    search_perplexity_sonar(
+                        query,
+                        perplexity_key,
+                        perplexity_model,
+                        context_text,
+                        max(3, per_query_limit // 2),
+                        category_hint="Thesis",
+                    )
+                )
+            except Exception as exc:
+                warnings.append(f"Deep Perplexity thesis layer failed for '{query}': {exc}")
+
     deduped = deduplicate_papers(all_papers)
     for paper in deduped:
         score, reason = heuristic_score_paper(paper, context_text)
@@ -1816,6 +1999,7 @@ def search_and_rank_papers(
 
     return {
         "queries": queries,
+        "deep_queries": deep_queries,
         "papers": ranked,
         "selected": selected,
         "warnings": warnings,
