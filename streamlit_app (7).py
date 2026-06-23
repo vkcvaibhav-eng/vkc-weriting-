@@ -33,6 +33,7 @@ from logic import (
     format_apa_reference,
     gemini_read_selected_papers,
     generate_full_draft,
+    generate_claude_discussion_search_plan,
     generate_search_queries,
     include_in_final_references,
     load_sau_icar_results_prompt,
@@ -245,6 +246,7 @@ def current_input_values() -> dict:
 
 def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]:
     result_text = combined_uploaded_text(files)
+    context_text = inputs["master_context"] + "\n" + inputs["raw_methodology"]
     analysis = analyze_research_context(
         st.session_state.openai_key,
         st.session_state.model,
@@ -254,14 +256,36 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         inputs["raw_methodology"],
         result_text,
     )
-    queries = generate_search_queries(
+    base_queries = generate_search_queries(
         st.session_state.openai_key,
         st.session_state.model,
         analysis,
-        inputs["master_context"] + "\n" + inputs["raw_methodology"],
+        context_text,
         result_text,
         max_queries=6,
     )
+    claude_plan = generate_claude_discussion_search_plan(
+        st.session_state.claude_key,
+        st.session_state.claude_model,
+        analysis,
+        context_text,
+        result_text,
+        current_style_profile(),
+        max_queries=8,
+    )
+    claude_queries = claude_plan.get("discussion_search_queries") or []
+    if claude_plan.get("needed_paper_types") or claude_queries or claude_plan.get("claude_query_error"):
+        analysis["claude_discussion_search_plan"] = claude_plan
+
+    queries = []
+    seen_queries = set()
+    for query_group in (base_queries, claude_queries):
+        for query in query_group:
+            clean_query = str(query).strip()
+            normalized_query = " ".join(clean_query.lower().split())
+            if clean_query and normalized_query not in seen_queries:
+                queries.append(clean_query)
+                seen_queries.add(normalized_query)
     return analysis, result_text, queries
 
 
@@ -695,6 +719,34 @@ with tabs[2]:
                     for value in values:
                         st.write(value)
 
+        claude_plan = analysis_state.get("claude_discussion_search_plan") or {}
+        if claude_plan:
+            with st.expander("Claude discussion evidence plan", expanded=True):
+                provider = claude_plan.get("query_provider") or "Claude"
+                model_used = claude_plan.get("model_used") or st.session_state.claude_model
+                st.caption(
+                    f"{provider} planned what paper types are needed for the Discussion, then the same search engines used those queries."
+                )
+                if model_used:
+                    st.caption(f"Model: {model_used}")
+                if claude_plan.get("claude_query_error"):
+                    st.warning(f"Claude query planning warning: {claude_plan.get('claude_query_error')}")
+                needed_types = claude_plan.get("needed_paper_types") or []
+                if needed_types:
+                    st.write("Needed paper types")
+                    for item in needed_types:
+                        st.write(item)
+                rationales = claude_plan.get("query_rationale") or []
+                if rationales:
+                    st.write("Why these queries were made")
+                    for item in rationales:
+                        st.write(item)
+                missing_questions = claude_plan.get("missing_evidence_questions") or []
+                if missing_questions:
+                    st.write("Questions to answer through reading")
+                    for item in missing_questions:
+                        st.write(item)
+
     search_result = st.session_state.get("paper_search") or {}
     deep_queries = search_result.get("deep_queries") or {}
     if deep_queries:
@@ -1026,8 +1078,8 @@ with tabs[3]:
         st.divider()
         st.subheader("Suggested Extra Evidence or Data")
         if st.button("Suggest missing papers, review support, thesis leads, or data checks", width="stretch"):
-            if not (st.session_state.gemini_key or st.session_state.openai_key):
-                st.error("Enter a Gemini or OpenAI key first.")
+            if not (st.session_state.claude_key or st.session_state.gemini_key or st.session_state.openai_key):
+                st.error("Enter a Claude, Gemini, or OpenAI key first.")
             else:
                 context_text = current_context_text(inputs, extracted_files)
                 with st.spinner("Checking what extra evidence or data would improve the selected-author-style paper..."):
@@ -1038,6 +1090,8 @@ with tabs[3]:
                         style_profile=current_style_profile(),
                         gemini_key=st.session_state.gemini_key,
                         gemini_model=st.session_state.gemini_model,
+                        claude_key=st.session_state.claude_key,
+                        claude_model=st.session_state.claude_model,
                         openai_key=st.session_state.openai_key,
                         openai_model=st.session_state.model,
                     )
@@ -1045,6 +1099,11 @@ with tabs[3]:
 
         suggestions = st.session_state.get("followup_suggestions") or {}
         if suggestions:
+            if suggestions.get("query_provider"):
+                model_note = f" ({suggestions.get('model_used')})" if suggestions.get("model_used") else ""
+                st.caption(f"Suggestion engine: {suggestions.get('query_provider')}{model_note}")
+            if suggestions.get("claude_query_error"):
+                st.warning(f"Claude follow-up planning warning: {suggestions.get('claude_query_error')}")
             search_queries = [str(q).strip() for q in suggestions.get("suggested_search_queries", []) if str(q).strip()]
             if suggestions.get("style_plan"):
                 with st.expander("Selected-style writing plan", expanded=True):

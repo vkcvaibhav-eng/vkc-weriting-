@@ -981,6 +981,83 @@ Return JSON array of {max_queries} short queries. Include crop/host, pest/pathog
         return fallback[:max_queries]
 
 
+def generate_claude_discussion_search_plan(
+    claude_key: str,
+    claude_model: str,
+    analysis: dict[str, Any],
+    context_text: str,
+    result_text: str,
+    style_profile: dict[str, Any] | None = None,
+    max_queries: int = 8,
+) -> dict[str, Any]:
+    fallback = {
+        "query_provider": "",
+        "model_used": "",
+        "needed_paper_types": [],
+        "discussion_search_queries": [],
+        "query_rationale": [],
+        "missing_evidence_questions": [],
+        "claude_query_error": "",
+    }
+    if not claude_key:
+        return fallback
+
+    prompt = f"""
+You are planning the literature search for the Discussion section of a research paper.
+The Results have priority. The search should find evidence needed to justify, explain,
+compare, contrast, and contextualize the actual findings.
+
+Research analysis:
+{json.dumps(analysis or {}, ensure_ascii=True)[:22000]}
+
+Methodology, research context, and user notes:
+{truncate_text(context_text, 9000)}
+
+Result evidence:
+{truncate_text(result_text, 12000)}
+
+Selected author writing-style contract:
+{json.dumps(style_profile or {}, ensure_ascii=True)[:18000]}
+
+Create a Discussion-first evidence plan.
+
+Rules:
+- Decide what type of paper is needed for each important finding before making queries.
+- Prefer original primary research papers for specific comparisons with our results.
+- Use review papers for broad synthesis, mechanism, and framing only.
+- Use theses only for RoL/source-mining queries, especially Krishikosh-style Indian theses; do not plan to cite the thesis itself.
+- Queries must include crop/host, pest/pathogen/organism, treatment/method, measured response, geography, or system terms when known.
+- Avoid generic topic-only queries.
+- Make queries that can work in Google Scholar, SerpAPI, Semantic Scholar, ResearchGate public pages, CORE, Perplexity, and thesis repositories.
+
+Return only a JSON object with keys:
+needed_paper_types: array of objects with finding, paper_type, why_needed;
+discussion_search_queries: array of {max_queries} precise scholarly search queries;
+query_rationale: array of objects with query, target_evidence, why_this_query;
+missing_evidence_questions: array of brief questions the app should answer through search or reading.
+"""
+    try:
+        text = claude_text(
+            claude_key,
+            claude_model,
+            "You are a premium scientific Discussion evidence planner.",
+            prompt,
+            temperature=0.1,
+            max_tokens=5000,
+        )
+        parsed = parse_json_object(text, fallback)
+        for key, value in fallback.items():
+            parsed.setdefault(key, value)
+        queries = [str(query).strip() for query in parsed.get("discussion_search_queries", []) if str(query).strip()]
+        parsed["discussion_search_queries"] = queries[:max_queries]
+        parsed["query_provider"] = "Claude"
+        parsed["model_used"] = claude_model or DEFAULT_CLAUDE_MODEL
+        return parsed
+    except Exception as exc:
+        fallback["claude_query_error"] = str(exc)
+        return fallback
+
+
 def normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
 
@@ -2884,6 +2961,8 @@ def suggest_style_aligned_followup_needs(
     style_profile: dict[str, Any],
     gemini_key: str = "",
     gemini_model: str = DEFAULT_GEMINI_MODEL,
+    claude_key: str = "",
+    claude_model: str = DEFAULT_CLAUDE_MODEL,
     openai_key: str = "",
     openai_model: str = "gpt-4o-mini",
 ) -> dict[str, Any]:
@@ -2892,6 +2971,9 @@ def suggest_style_aligned_followup_needs(
         "needed_data_checks": [],
         "why_needed": [],
         "style_plan": [],
+        "query_provider": "",
+        "model_used": "",
+        "claude_query_error": "",
     }
     compact_refs = []
     for paper in selected_papers[:24]:
@@ -2931,12 +3013,40 @@ for the original primary papers. Use review papers for broad synthesis, but plan
 specific methods, results, and discussion comparisons.
 Do not ask for unnecessary information. Only suggest what would materially improve the paper.
 """
+    if claude_key:
+        try:
+            text = claude_text(
+                claude_key,
+                claude_model,
+                "You are a premium scientific Discussion evidence planner and style-aware editor.",
+                prompt
+                + """
+
+For suggested_search_queries, think first about the Discussion framework:
+our finding -> likely mechanism -> agreement or disagreement with original studies -> review synthesis
+-> implication. Suggest only queries that fill a real evidence gap in that framework.
+""",
+                temperature=0.1,
+                max_tokens=5000,
+            )
+            parsed = parse_json_object(text, fallback)
+            for key, value in fallback.items():
+                parsed.setdefault(key, value)
+            parsed["query_provider"] = "Claude"
+            parsed["model_used"] = claude_model or DEFAULT_CLAUDE_MODEL
+            return parsed
+        except Exception as exc:
+            fallback["claude_query_error"] = str(exc)
     if gemini_key:
         try:
             text = gemini_generate_text(gemini_key, gemini_model, prompt, temperature=0.1)
             parsed = parse_json_object(text, fallback)
             for key, value in fallback.items():
                 parsed.setdefault(key, value)
+            if not parsed.get("query_provider"):
+                parsed["query_provider"] = "Gemini"
+            if not parsed.get("model_used"):
+                parsed["model_used"] = gemini_model or DEFAULT_GEMINI_MODEL
             return parsed
         except Exception:
             pass
@@ -2953,6 +3063,10 @@ Do not ask for unnecessary information. Only suggest what would materially impro
             parsed = parse_json_object(text, fallback)
             for key, value in fallback.items():
                 parsed.setdefault(key, value)
+            if not parsed.get("query_provider"):
+                parsed["query_provider"] = "OpenAI"
+            if not parsed.get("model_used"):
+                parsed["model_used"] = openai_model
             return parsed
         except Exception:
             return fallback
