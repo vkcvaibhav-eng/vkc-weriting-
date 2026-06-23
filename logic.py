@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover - import error is shown in the Streamlit U
 
 APP_ROOT = Path(__file__).resolve().parent
 STYLE_LIBRARY_DIR = APP_ROOT / "style_library"
+AUTHOR_STYLE_DIR = APP_ROOT / "styles"
 OUTPUT_DIR = APP_ROOT / "outputs"
 DOWNLOADED_REFERENCES_DIR = APP_ROOT / "downloaded_references"
 SSL_VERIFY = os.getenv("RP_APP_VERIFY_SSL", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -41,14 +42,14 @@ MIN_REVIEW_PAPERS = 1
 MIN_REFERENCE_COUNT = MIN_RESEARCH_ARTICLES + MIN_THESES + MIN_REVIEW_PAPERS
 DEFAULT_PERPLEXITY_MODEL = "sonar-pro"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
-DEFAULT_SHELTON_STYLE_PATH = r"G:\My Drive\#NAU\Softwere for analysis\Project for research paper\2026\weriting style maker\Anthony M. Shelton.docx"
-DEFAULT_GURR_STYLE_PATH = r"G:\My Drive\#NAU\Softwere for analysis\Project for research paper\2026\weriting style maker\Dr. Gurr's Style.docx"
-DEFAULT_NARANJO_STYLE_PATH = r"G:\My Drive\#NAU\Softwere for analysis\Project for research paper\2026\weriting style maker\Steven E. Naranjo.docx"
-DEFAULT_LANDIS_STYLE_PATH = r"G:\My Drive\#NAU\Softwere for analysis\Project for research paper\2026\weriting style maker\Dr. Landis's Style.docx"
-DEFAULT_PICKETT_STYLE_PATH = r"G:\My Drive\#NAU\Softwere for analysis\Project for research paper\2026\weriting style maker\Dr. Pickett's Style.docx"
-DEFAULT_RUBERSON_STYLE_PATH = r"G:\My Drive\#NAU\Softwere for analysis\Project for research paper\2026\weriting style maker\John R. Ruberson.docx"
-DEFAULT_KOGAN_STYLE_PATH = r"G:\My Drive\#NAU\Softwere for analysis\Project for research paper\2026\weriting style maker\Kogan style.docx"
-DEFAULT_DESNEUX_STYLE_PATH = r"G:\My Drive\#NAU\Softwere for analysis\Project for research paper\2026\weriting style maker\Nicolas Desneux.docx"
+DEFAULT_SHELTON_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Anthony M. Shelton.docx")
+DEFAULT_GURR_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Gurr's Style.docx")
+DEFAULT_NARANJO_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Steven E. Naranjo.docx")
+DEFAULT_LANDIS_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Landis's Style.docx")
+DEFAULT_PICKETT_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Pickett's Style.docx")
+DEFAULT_RUBERSON_STYLE_PATH = str(AUTHOR_STYLE_DIR / "John R. Ruberson.docx")
+DEFAULT_KOGAN_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Kogan style.docx")
+DEFAULT_DESNEUX_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Nicolas Desneux.docx")
 STYLE_PRESETS = {
     "Anthony M. Shelton": DEFAULT_SHELTON_STYLE_PATH,
     "Dr. Gurr": DEFAULT_GURR_STYLE_PATH,
