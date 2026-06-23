@@ -36,6 +36,7 @@ from logic import (
     suggest_style_aligned_followup_needs,
     summarize_gemini_reference_notes,
     table_to_plain_text,
+    thesis_primary_study_search_queries,
     truncate_text,
 )
 
@@ -869,6 +870,45 @@ with tabs[3]:
                 with st.expander("Primary-study leads extracted from thesis RoL", expanded=True):
                     for lead in primary_leads[:30]:
                         st.write(lead)
+                rol_queries = thesis_primary_study_search_queries(
+                    primary_leads,
+                    current_context_text(inputs, extracted_files),
+                )
+                if rol_queries:
+                    with st.expander("Primary-paper search queries from thesis RoL", expanded=False):
+                        for query in rol_queries:
+                            st.code(query, language="text")
+                    if st.button("Search original papers from thesis RoL leads now", type="primary", width="stretch"):
+                        context_text = current_context_text(inputs, extracted_files)
+                        with st.spinner("Searching original primary papers named or implied in thesis RoL sections..."):
+                            extra_search = search_and_rank_papers(
+                                queries=rol_queries,
+                                context_text=context_text,
+                                semantic_key=st.session_state.semantic_key,
+                                serpapi_key=st.session_state.serpapi_key,
+                                core_key=st.session_state.core_key,
+                                perplexity_key=st.session_state.perplexity_key,
+                                perplexity_model=st.session_state.perplexity_model,
+                                openai_key=st.session_state.openai_key,
+                                model=st.session_state.model,
+                                reference_count=st.session_state.reference_count,
+                                per_query_limit=st.session_state.per_query_limit,
+                                use_ai_scoring=st.session_state.use_ai_scoring,
+                            )
+                        st.session_state.paper_search = merge_search_results(
+                            st.session_state.get("paper_search") or {},
+                            extra_search,
+                            st.session_state.reference_count,
+                        )
+                        st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
+                        selected_ids = {str(item.get("paper_id")) for item in st.session_state.selected_papers}
+                        st.session_state.downloaded_references = [
+                            item for item in st.session_state.get("downloaded_references", [])
+                            if str(item.get("paper_id")) in selected_ids
+                        ]
+                        st.success(
+                            f"Merged thesis-RoL primary-paper search. Selected {len(st.session_state.selected_papers)} sources."
+                        )
 
             gaps = recommendations.get("coverage_gaps") or []
             if gaps:

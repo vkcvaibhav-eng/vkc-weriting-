@@ -2387,6 +2387,54 @@ def include_in_final_references(paper: dict[str, Any]) -> bool:
     return bool(note.get("cite_thesis_directly") or paper.get("cite_thesis_directly"))
 
 
+def thesis_primary_study_search_queries(leads: list[Any], context_text: str = "", limit: int = 12) -> list[str]:
+    queries: list[str] = []
+    seen: set[str] = set()
+    context_terms = " ".join(re.findall(r"[A-Za-z][A-Za-z-]{3,}", context_text or "")[:18])
+
+    def add_query(raw: Any) -> None:
+        query = re.sub(r"\s+", " ", str(raw or "")).strip(" .;:")
+        if not query:
+            return
+        query = re.sub(r"\b(thesis|dissertation|review of literature|rol)\b", "", query, flags=re.I)
+        query = re.sub(r"\s+", " ", query).strip(" .;:")
+        if len(query) < 12:
+            return
+        key = query.lower()
+        if key not in seen:
+            seen.add(key)
+            queries.append(query[:260])
+
+    for lead in leads or []:
+        if len(queries) >= limit:
+            break
+        if isinstance(lead, dict):
+            explicit = (
+                lead.get("search_query_to_find_primary_paper")
+                or lead.get("search_query")
+                or lead.get("query")
+            )
+            add_query(explicit)
+            author_year = lead.get("author_year") or lead.get("citation") or lead.get("reference")
+            title = lead.get("title") or lead.get("study_title")
+            topic = lead.get("objective_or_topic") or lead.get("topic") or lead.get("why_it_matches")
+            context = lead.get("crop_pest_context") or lead.get("method_or_treatment") or lead.get("key_result")
+            if author_year and title:
+                add_query(f'{author_year} "{title}"')
+            if author_year and topic:
+                add_query(f"{author_year} {topic} original research paper")
+            if title and context:
+                add_query(f'"{title}" {context}')
+            if author_year and context_terms:
+                add_query(f"{author_year} {context_terms} research paper")
+        else:
+            lead_text = str(lead or "").strip()
+            add_query(lead_text)
+            if lead_text:
+                add_query(f"{lead_text} original research paper")
+    return queries[:limit]
+
+
 def gemini_generate_text(api_key: str, model: str, prompt: str, temperature: float = 0.2) -> str:
     if not api_key:
         return ""
