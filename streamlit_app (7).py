@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import streamlit as st
 
@@ -40,6 +42,108 @@ from logic import (
 st.set_page_config(page_title="Research Paper Writer", layout="wide")
 
 
+API_SECRET_NAMES = {
+    "openai_key": (
+        "OPENAI_API_KEY",
+        "OPENAI_KEY",
+        "openai_api_key",
+        "openai.key",
+        "openai.api_key",
+    ),
+    "serpapi_key": (
+        "SERPAPI_API_KEY",
+        "SERPAPI_KEY",
+        "serpapi_api_key",
+        "serpapi.key",
+        "serpapi.api_key",
+    ),
+    "semantic_key": (
+        "SEMANTIC_SCHOLAR_API_KEY",
+        "SEMANTIC_KEY",
+        "semantic_scholar_api_key",
+        "semantic_scholar.key",
+        "semantic_scholar.api_key",
+    ),
+    "core_key": (
+        "CORE_API_KEY",
+        "CORE_KEY",
+        "core_api_key",
+        "core.key",
+        "core.api_key",
+    ),
+    "perplexity_key": (
+        "PERPLEXITY_API_KEY",
+        "PERPLEXITY_KEY",
+        "perplexity_api_key",
+        "perplexity.key",
+        "perplexity.api_key",
+    ),
+    "gemini_key": (
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_KEY",
+        "gemini_api_key",
+        "google_api_key",
+        "gemini.key",
+        "gemini.api_key",
+    ),
+}
+
+API_SECRETS_TEMPLATE = """OPENAI_API_KEY = "your-openai-key"
+SERPAPI_API_KEY = "your-serpapi-key"
+SEMANTIC_SCHOLAR_API_KEY = "your-semantic-scholar-key"
+CORE_API_KEY = "your-core-key"
+PERPLEXITY_API_KEY = "your-perplexity-key"
+GEMINI_API_KEY = "your-gemini-key"
+"""
+
+
+def read_streamlit_secret(name: str) -> str:
+    try:
+        current = st.secrets
+        for part in name.split("."):
+            current = current[part]
+        return str(current).strip() if current else ""
+    except Exception:
+        return ""
+
+
+def read_secret_or_env(*names: str) -> str:
+    for name in names:
+        value = read_streamlit_secret(name)
+        if value:
+            return value
+    for name in names:
+        env_name = name.upper().replace(".", "_")
+        value = os.getenv(env_name, "")
+        if value:
+            return value.strip()
+    return ""
+
+
+def sync_api_keys_from_secrets() -> None:
+    if st.session_state.get("manual_api_key_override"):
+        return
+    for state_key, secret_names in API_SECRET_NAMES.items():
+        value = read_secret_or_env(*secret_names)
+        if value:
+            st.session_state[state_key] = value
+
+
+def configure_api_key(label: str, state_key: str) -> None:
+    secret_value = read_secret_or_env(*API_SECRET_NAMES[state_key])
+    if secret_value and not st.session_state.get("manual_api_key_override"):
+        st.session_state[state_key] = secret_value
+        st.caption(f"{label}: loaded from Streamlit secrets")
+        return
+
+    value = st.text_input(label, type="password", value="" if secret_value else st.session_state[state_key])
+    if value:
+        st.session_state[state_key] = value
+    elif not secret_value:
+        st.session_state[state_key] = ""
+
+
 def init_state() -> None:
     defaults = {
         "openai_key": "",
@@ -51,6 +155,7 @@ def init_state() -> None:
         "gemini_key": "",
         "gemini_model": DEFAULT_GEMINI_MODEL,
         "model": "gpt-4o-mini",
+        "manual_api_key_override": False,
         "reference_count": MIN_REFERENCE_COUNT,
         "per_query_limit": 10,
         "use_ai_scoring": True,
@@ -81,6 +186,7 @@ def init_state() -> None:
     if st.session_state.get("shelton_style_contract") and not st.session_state.get("active_style_contract"):
         st.session_state.active_style_contract = st.session_state.shelton_style_contract
         st.session_state.active_style_report = st.session_state.get("shelton_style_report", {})
+    sync_api_keys_from_secrets()
 
 
 def current_extracted_files():
@@ -176,26 +282,23 @@ init_state()
 
 with st.sidebar:
     st.header("API Settings")
-    openai_key = st.text_input("OpenAI API key", type="password", value=st.session_state.openai_key)
-    if openai_key != st.session_state.openai_key:
-        st.session_state.openai_key = openai_key
+    st.checkbox("Manual API key override", key="manual_api_key_override")
+    configure_api_key("OpenAI API key", "openai_key")
 
     st.session_state.model = st.text_input("OpenAI model", value=st.session_state.model)
 
     st.divider()
     st.subheader("Reference Search")
-    serpapi_key = st.text_input("SerpAPI key", type="password", value=st.session_state.serpapi_key)
-    semantic_key = st.text_input("Semantic Scholar key", type="password", value=st.session_state.semantic_key)
-    core_key = st.text_input("CORE API key", type="password", value=st.session_state.core_key)
-    perplexity_key = st.text_input("Perplexity Sonar key", type="password", value=st.session_state.perplexity_key)
+    configure_api_key("SerpAPI key", "serpapi_key")
+    configure_api_key("Semantic Scholar key", "semantic_key")
+    configure_api_key("CORE API key", "core_key")
+    configure_api_key("Perplexity Sonar key", "perplexity_key")
     st.session_state.perplexity_model = st.text_input("Perplexity model", value=st.session_state.perplexity_model)
-    gemini_key = st.text_input("Google Gemini API key", type="password", value=st.session_state.gemini_key)
+    configure_api_key("Google Gemini API key", "gemini_key")
     st.session_state.gemini_model = st.text_input("Gemini model", value=st.session_state.gemini_model)
-    st.session_state.serpapi_key = serpapi_key
-    st.session_state.semantic_key = semantic_key
-    st.session_state.core_key = core_key
-    st.session_state.perplexity_key = perplexity_key
-    st.session_state.gemini_key = gemini_key
+
+    with st.expander("Streamlit secrets template"):
+        st.code(API_SECRETS_TEMPLATE, language="toml")
 
     st.session_state.reference_count = st.slider(
         "References to select",
