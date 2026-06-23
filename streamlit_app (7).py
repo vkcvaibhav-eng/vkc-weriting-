@@ -34,6 +34,7 @@ from logic import (
     generate_full_draft,
     generate_search_queries,
     include_in_final_references,
+    load_sau_icar_results_prompt,
     load_writing_style_contract,
     merge_search_results,
     recommend_writing_style,
@@ -1112,6 +1113,9 @@ with tabs[4]:
 
     with st.expander("Results-first discussion framework", expanded=False):
         st.markdown(DISCUSSION_WORKFLOW_TEXT)
+
+    with st.expander("SAU/ICAR Results writing guide", expanded=False):
+        st.markdown(truncate_text(load_sau_icar_results_prompt(), 12000))
 
     if st.button("Generate selected-style full paper draft", type="primary", width="stretch"):
         if not st.session_state.openai_key:

@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - import error is shown in the Streamlit U
 APP_ROOT = Path(__file__).resolve().parent
 STYLE_LIBRARY_DIR = APP_ROOT / "style_library"
 AUTHOR_STYLE_DIR = APP_ROOT / "styles"
+SAU_ICAR_RESULTS_PROMPT_PATH = APP_ROOT / "master_prompt.md"
 OUTPUT_DIR = APP_ROOT / "outputs"
 DOWNLOADED_REFERENCES_DIR = APP_ROOT / "downloaded_references"
 SSL_VERIFY = os.getenv("RP_APP_VERIFY_SSL", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -63,6 +64,28 @@ The Discussion must not be a generic literature summary. It should answer:
 - What is the practical or scientific implication?
 
 Academic style has priority: the chosen author's framing, transitions, hedging, validation rhetoric, and paragraph movement should guide how the findings are justified through related work."""
+SAU_ICAR_RESULTS_PROMPT_FALLBACK = """SAU/ICAR thesis Results writing rules:
+- Write formal Indian agricultural university Results style for entomology, acarology, plant protection, population dynamics, screening, yield, economics, and pest management experiments.
+- Use only supplied table/result values. Do not invent values, treatments, years, CD, SEm, CV, significance, or grouping.
+- If values appear as original (transformed), report only original values in the result narrative. Use transformed values only for statistical interpretation.
+- Use statistical grouping silently to decide statistically at par or significantly different treatments; never print grouping letters in the narrative.
+- Identify whether lower or higher value is desirable before ranking treatments.
+- Write table-wise, year-wise, spray-wise, pooled-wise, or treatment-wise according to the table structure.
+- Use the paragraph flow: table reference -> significance statement -> best treatment -> at par treatments -> next best/moderate treatments -> worst/control -> pooled result if available -> interaction at the end.
+- Keep Results separate from Discussion. Do not explain causes or compare with literature in Results.
+- Use passive, examiner-oriented phrases such as significantly lowest, significantly highest, statistically at par with, differed significantly, recorded, registered, observed, exhibited, proved effective, and pooled data revealed.
+- Untreated control/check should usually be reported at the end.
+- For unclear table values or statistical grouping, state that the value/statistical grouping was not clearly readable and was not interpreted."""
+
+
+def load_sau_icar_results_prompt() -> str:
+    try:
+        text = SAU_ICAR_RESULTS_PROMPT_PATH.read_text(encoding="utf-8")
+        return text.strip() or SAU_ICAR_RESULTS_PROMPT_FALLBACK
+    except Exception:
+        return SAU_ICAR_RESULTS_PROMPT_FALLBACK
+
+
 DEFAULT_NARANJO_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Steven E. Naranjo.docx")
 DEFAULT_LANDIS_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Landis's Style.docx")
 DEFAULT_PICKETT_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Pickett's Style.docx")
@@ -3159,8 +3182,12 @@ def write_results(
     table_summaries: str,
     image_summaries: str,
 ) -> str:
+    sau_icar_results_prompt = load_sau_icar_results_prompt()
     prompt = f"""
 Write the Results section only.
+
+Mandatory SAU/ICAR thesis-style result-writing rulebook:
+{truncate_text(sau_icar_results_prompt, 22000)}
 
 Strict style contract:
 {style_excerpt(styles, "style_contract", 5000)}
@@ -3170,11 +3197,19 @@ Preferred result vocabulary:
 {style_excerpt(styles, "word_bank", 3500)}
 
 Rules:
-- Use only supplied result evidence.
-- Use phrases such as significantly, non-significant, minimum, maximum, highest, least, pooled data only when supported.
-- Refer to tables and figures where appropriate.
+- Use the SAU/ICAR rulebook as the primary authority for Results writing and table interpretation.
+- Use only supplied result evidence. Do not invent treatments, values, statistical groupings, years, sprays, pooled means, or units.
+- If original and transformed values are present, write only the original values in the narrative; use transformed values only for significance/statistical grouping.
+- Do not print DNMRT/DMRT/CD grouping letters or transformed values in the final Results narrative.
+- Use phrases such as significantly lowest, significantly highest, statistically at par with, differed significantly,
+  non-significant, minimum, maximum, highest, least, pooled data revealed, recorded, registered, observed, and exhibited only when supported.
+- Refer to tables and figures where appropriate, and organize paragraphs table-wise, year-wise, spray-wise, pooled-wise, or treatment-wise according to the evidence.
+- For each table/parameter, follow the flow: table reference, significance statement, best treatment, statistically at par treatments,
+  next best or moderate treatments, worst/control treatment, pooled result if available, and interaction only at the end.
 - Do not compare with other authors in this section.
 - If statistical significance is not supplied, describe numerical trends cautiously.
+- Do not include "Table Understanding", "Statistical Note", or quality-check headings in the manuscript Results section.
+- If a value or grouping is unclear, state briefly that it was not clearly readable and was not interpreted.
 
 {common}
 
