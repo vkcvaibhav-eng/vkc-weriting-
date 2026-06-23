@@ -11,6 +11,7 @@ import logic as logic_module
 importlib.reload(logic_module)
 
 from logic import (
+    DISCUSSION_WORKFLOW_TEXT,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_PERPLEXITY_MODEL,
     DEFAULT_SHELTON_STYLE_PATH,
@@ -651,6 +652,26 @@ with tabs[2]:
             for query in st.session_state.queries:
                 st.code(query, language="text")
 
+    analysis_state = st.session_state.get("analysis") or {}
+    if analysis_state:
+        with st.expander("Research questions and result logic", expanded=True):
+            if analysis_state.get("objective"):
+                st.write("Objective")
+                st.write(analysis_state.get("objective"))
+            for label, key in [
+                ("Treatments / variables", "treatments_variables"),
+                ("Major findings", "major_findings"),
+                ("Significant differences", "significant_differences"),
+                ("Patterns and trends", "result_patterns"),
+                ("Likely research questions", "research_questions"),
+                ("Discussion needs", "discussion_needs"),
+            ]:
+                values = analysis_state.get(key) or []
+                if values:
+                    st.write(label)
+                    for value in values:
+                        st.write(value)
+
     search_result = st.session_state.get("paper_search") or {}
     deep_queries = search_result.get("deep_queries") or {}
     if deep_queries:
@@ -1089,6 +1110,9 @@ with tabs[4]:
     cols[3].metric("Tables", len(collect_tables(extracted_files)))
     cols[4].metric("Graphs", len(collect_images(extracted_files)))
 
+    with st.expander("Results-first discussion framework", expanded=False):
+        st.markdown(DISCUSSION_WORKFLOW_TEXT)
+
     if st.button("Generate selected-style full paper draft", type="primary", width="stretch"):
         if not st.session_state.openai_key:
             st.error("Enter an OpenAI API key in the sidebar before drafting.")
@@ -1101,7 +1125,7 @@ with tabs[4]:
                 st.warning("Selected references have not been downloaded/read yet; discussion will rely mostly on abstracts.")
             if selected_papers and not any(p.get("gemini_note") for p in selected_papers):
                 st.warning("Run Gemini Reading first for stronger literature matching and thesis-reference extraction.")
-            with st.spinner("Writing methodology, results, discussion, conclusion, introduction, and abstract..."):
+            with st.spinner("Writing Results first, planning the style-led Discussion framework, then drafting the full paper..."):
                 try:
                     draft = generate_full_draft(
                         api_key=st.session_state.openai_key,
@@ -1132,6 +1156,7 @@ with tabs[4]:
             ("Introduction", "introduction"),
             ("Materials and Methods", "methodology"),
             ("Results", "results"),
+            ("Discussion Framework", "discussion_framework"),
             ("Discussion", "discussion"),
             ("Conclusion", "conclusion"),
             ("References", "references"),
@@ -1142,6 +1167,8 @@ with tabs[4]:
                 if key == "references":
                     for ref in value:
                         st.write(ref)
+                elif key == "discussion_framework":
+                    st.json(value)
                 else:
                     st.write(value)
 

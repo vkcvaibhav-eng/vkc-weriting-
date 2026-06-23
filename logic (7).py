@@ -44,6 +44,25 @@ DEFAULT_PERPLEXITY_MODEL = "sonar-pro"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_SHELTON_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Anthony M. Shelton.docx")
 DEFAULT_GURR_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Gurr's Style.docx")
+DISCUSSION_WORKFLOW_TEXT = """Results-first discussion workflow:
+1. Upload methodology, tables, experimental details, and result files.
+2. Analyze treatments/variables, major findings, significant differences, patterns, trends, and likely research questions/objectives.
+3. Recommend the most suitable writing style from the methodology and results.
+4. Write the Results section first from the actual tables and figures.
+5. Use the written Results section as the backbone for Discussion.
+6. Search literature that explains, validates, contrasts, or contextualizes those exact findings.
+7. Use Gemini reading notes from papers, theses, and reviews to extract evidence related to the findings.
+8. Build each discussion paragraph around: finding -> biological/agronomic explanation -> comparison with original studies -> support from review insights -> limitation or implication.
+
+The Discussion must not be a generic literature summary. It should answer:
+- What did we find?
+- Why did it happen?
+- Does it agree or disagree with previous studies?
+- Which original papers support or contrast it?
+- What does it mean for the crop/pest/system/method?
+- What is the practical or scientific implication?
+
+Academic style has priority: the chosen author's framing, transitions, hedging, validation rhetoric, and paragraph movement should guide how the findings are justified through related work."""
 DEFAULT_NARANJO_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Steven E. Naranjo.docx")
 DEFAULT_LANDIS_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Landis's Style.docx")
 DEFAULT_PICKETT_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Pickett's Style.docx")
@@ -792,8 +811,13 @@ def analyze_research_context(
         "generated_title": fallback_title,
         "objective": "",
         "keywords": fallback_keywords(" ".join([paper_title, research_area, master_context, raw_methodology, result_text])),
+        "treatments_variables": [],
         "major_findings": [],
+        "significant_differences": [],
+        "result_patterns": [],
         "treatment_rankings": [],
+        "research_questions": [],
+        "discussion_needs": [],
         "search_queries": [],
         "result_summary": truncate_text(result_text, 1200),
     }
@@ -815,9 +839,11 @@ Result evidence:
 {truncate_text(result_text, 9000)}
 
 JSON keys:
-generated_title, objective, keywords, major_findings, treatment_rankings, search_queries, result_summary.
+generated_title, objective, keywords, treatments_variables, major_findings, significant_differences,
+result_patterns, treatment_rankings, research_questions, discussion_needs, search_queries, result_summary.
 Use only supplied facts. If title is missing, create a concise scientific title.
 Create 5 to 8 search_queries that will find papers useful for discussion and references.
+The search_queries and discussion_needs must be driven by the actual results, not generic topic coverage.
 """
     try:
         text = chat_text(
@@ -3161,6 +3187,90 @@ Graph or image evidence:
     return chat_text(api_key, model, "You write Results sections from supplied data without inventing values.", prompt, temperature=0.2)
 
 
+def build_discussion_framework(
+    api_key: str,
+    model: str,
+    common: str,
+    styles: dict[str, str],
+    analysis: dict[str, Any],
+    selected_papers: list[dict[str, Any]],
+    results_section: str,
+) -> dict[str, Any]:
+    fallback = {
+        "style_priority": "Use the selected author's academic framing and validation rhetoric before basic reporting.",
+        "discussion_thesis": "",
+        "paragraph_framework": [],
+        "citation_strategy": [
+            "Use original selected primary papers for specific comparisons.",
+            "Use review papers only for broad synthesis unless an original paper has also been selected.",
+            "Do not cite theses that are marked source-mining only.",
+        ],
+        "workflow": DISCUSSION_WORKFLOW_TEXT,
+    }
+    if not api_key:
+        return fallback
+
+    prompt = f"""
+Plan the Discussion section before writing it.
+
+Academic writing style has priority over basic logical reporting. The selected author's framing, rhetorical movement,
+hedging, validation language, and paragraph structure must guide the plan. The core strategy is to justify our findings
+by directly contextualizing and validating them through related work.
+
+Required workflow:
+{DISCUSSION_WORKFLOW_TEXT}
+
+Strict style contract:
+{style_excerpt(styles, "style_contract", 5000)}
+
+Discussion style examples:
+{style_excerpt(styles, "discussion", 7000)}
+
+Comparison and validation vocabulary:
+{style_excerpt(styles, "word_bank", 3500)}
+
+Structured analysis of uploaded methodology/results:
+{json.dumps(analysis, ensure_ascii=True)[:16000]}
+
+Selected references and Gemini reading notes:
+{reference_context(selected_papers)}
+
+Results section already drafted:
+{truncate_text(results_section, 9000)}
+
+Return only a JSON object with keys:
+style_priority: one sentence explaining the dominant rhetorical style strategy;
+discussion_thesis: one sentence that states the central interpretive claim of the Discussion;
+paragraph_framework: array of objects with finding, rhetorical_move, biological_or_agronomic_explanation,
+validation_with_related_work, original_primary_citations_to_use, review_insights_to_use, limitation_or_implication,
+and paragraph_transition;
+citation_strategy: array of concrete rules for how citations should be used in this Discussion;
+workflow: concise reminder of the results-first discussion workflow.
+
+Rules:
+- Every paragraph framework item must start from a supplied result/finding.
+- Do not invent citations, author names, years, or unsupported mechanisms.
+- Use thesis and review mined leads only as search/interpretation guidance unless the original primary paper is selected.
+- Make the plan style-led: the rhetorical move should be more than "report finding"; it should frame, validate,
+  reconcile, qualify, or extend the finding through related work.
+"""
+    try:
+        text = chat_text(
+            api_key,
+            model,
+            "You plan style-led scientific Discussion sections from results and literature evidence.",
+            prompt,
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        parsed = parse_json_object(text, fallback)
+        for key, value in fallback.items():
+            parsed.setdefault(key, value)
+        return parsed
+    except Exception:
+        return fallback
+
+
 def write_discussion(
     api_key: str,
     model: str,
@@ -3168,6 +3278,7 @@ def write_discussion(
     styles: dict[str, str],
     selected_papers: list[dict[str, Any]],
     results_section: str,
+    discussion_framework: dict[str, Any] | None = None,
 ) -> str:
     prompt = f"""
 Write the Discussion section.
@@ -3184,8 +3295,15 @@ Preferred comparison vocabulary:
 Selected references allowed for citation:
 {reference_context(selected_papers)}
 
+Discussion framework to follow:
+{json.dumps(discussion_framework or {}, ensure_ascii=True)[:18000]}
+
 Rules:
+- Academic writing style, framing, and validation rhetoric take precedence over plain logical reporting.
 - Interpret the supplied results and compare them with selected references only.
+- The paragraph order must follow the Discussion framework where possible: finding -> explanation -> validation or contrast
+  with related work -> review synthesis where appropriate -> limitation or implication.
+- Each paragraph must justify the finding by contextualizing it with related work, not merely list previous studies.
 - Prefer Gemini reading notes and downloaded full_text_excerpt evidence where available; use abstracts only when full text was not downloaded/read.
 - Thesis entries marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY are not allowed citations.
 - Use thesis RoL notes only to understand which original primary studies should be searched/selected; cite only
@@ -3355,7 +3473,8 @@ def generate_full_draft(
 
     methodology = write_methodology(api_key, model, common, raw_methodology, styles)
     results = write_results(api_key, model, common, styles, table_summaries, image_summaries)
-    discussion = write_discussion(api_key, model, common, styles, selected_papers, results)
+    discussion_framework = build_discussion_framework(api_key, model, common, styles, analysis, selected_papers, results)
+    discussion = write_discussion(api_key, model, common, styles, selected_papers, results, discussion_framework)
     conclusion = write_conclusion(api_key, model, common, styles, results, discussion)
     introduction = write_introduction(api_key, model, common, styles, selected_papers)
     abstract = write_abstract(api_key, model, common, styles, methodology, results, conclusion)
@@ -3369,6 +3488,7 @@ def generate_full_draft(
         "introduction": introduction,
         "methodology": methodology,
         "results": results,
+        "discussion_framework": discussion_framework,
         "discussion": discussion,
         "conclusion": conclusion,
         "references": references,
