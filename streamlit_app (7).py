@@ -21,6 +21,7 @@ from logic import (
     audit_draft_with_gemini_style_editor,
     audit_draft_with_openai_style_editor,
     analyze_research_context,
+    build_discussion_framework,
     build_docx,
     citation_key,
     collect_images,
@@ -43,11 +44,13 @@ from logic import (
     revise_draft_with_style_audits,
     review_primary_study_search_queries,
     search_and_rank_papers,
+    section_prompt_common,
     suggest_style_aligned_followup_needs,
     summarize_gemini_reference_notes,
     table_to_plain_text,
     thesis_primary_study_search_queries,
     truncate_text,
+    write_results,
 )
 
 
@@ -256,11 +259,60 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         inputs["raw_methodology"],
         result_text,
     )
+    result_title = inputs["paper_title"] or analysis.get("generated_title") or "Research Paper Draft"
+    analysis["analysis_title"] = result_title
+    styles = current_style_sections()
+    common = section_prompt_common(
+        result_title,
+        inputs.get("authors", ""),
+        inputs.get("affiliation", ""),
+        inputs.get("research_area", ""),
+        inputs.get("master_context", ""),
+        analysis,
+        result_text,
+    )
+    tables = collect_tables(files)
+    images = collect_images(files)
+    table_summaries = "\n\n".join(table_to_plain_text(table) for table in tables)
+    image_summaries = "\n\n".join(
+        f"Figure from {image['name']}:\n{image.get('summary', '')}" for image in images if image.get("summary")
+    )
+
+    results_section = ""
+    if st.session_state.openai_key:
+        try:
+            results_section = write_results(
+                st.session_state.openai_key,
+                st.session_state.model,
+                common,
+                styles,
+                table_summaries,
+                image_summaries,
+            )
+            analysis["results_draft"] = results_section
+        except Exception as exc:
+            analysis["results_draft_error"] = str(exc)
+    else:
+        analysis["results_draft_error"] = "OpenAI key is required to write the first Results draft."
+
+    discussion_framework = build_discussion_framework(
+        st.session_state.openai_key,
+        st.session_state.model,
+        common,
+        styles,
+        analysis,
+        [],
+        results_section or result_text,
+        claude_key=st.session_state.claude_key,
+        claude_model=st.session_state.claude_model,
+    )
+    analysis["discussion_framework"] = discussion_framework
+
     base_queries = generate_search_queries(
         st.session_state.openai_key,
         st.session_state.model,
         analysis,
-        context_text,
+        context_text + "\n\nDrafted Results:\n" + results_section,
         result_text,
         max_queries=6,
     )
@@ -271,6 +323,8 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         context_text,
         result_text,
         current_style_profile(),
+        results_section=results_section,
+        discussion_framework=discussion_framework,
         max_queries=8,
     )
     claude_queries = claude_plan.get("discussion_search_queries") or []
@@ -671,7 +725,9 @@ with tabs[2]:
         if not (inputs["master_context"] or inputs["raw_methodology"] or extracted_files):
             st.warning("Add methodology, master context, or result files before searching.")
         else:
-            with st.spinner("Analyzing findings, building queries, searching, deduplicating, and scoring papers..."):
+            with st.spinner(
+                "Analyzing findings, writing Results, building the Discussion framework, planning evidence, searching, deduplicating, and scoring papers..."
+            ):
                 analysis, result_text, queries = build_context_for_search(inputs, extracted_files)
                 context_text = current_context_text(inputs, extracted_files, analysis)
                 search_result = search_and_rank_papers(
@@ -708,6 +764,9 @@ with tabs[2]:
     analysis_state = st.session_state.get("analysis") or {}
     if analysis_state:
         with st.expander("Research questions and result logic", expanded=True):
+            if analysis_state.get("analysis_title"):
+                st.write("Working title")
+                st.write(analysis_state.get("analysis_title"))
             if analysis_state.get("objective"):
                 st.write("Objective")
                 st.write(analysis_state.get("objective"))
@@ -724,6 +783,40 @@ with tabs[2]:
                     st.write(label)
                     for value in values:
                         st.write(value)
+
+        if analysis_state.get("results_draft") or analysis_state.get("results_draft_error"):
+            with st.expander("Results draft from analyzed findings", expanded=True):
+                st.caption("Written first from uploaded tables, figures, methodology context, and extracted result text.")
+                if analysis_state.get("results_draft_error"):
+                    st.warning(analysis_state.get("results_draft_error"))
+                if analysis_state.get("results_draft"):
+                    st.markdown(analysis_state.get("results_draft"))
+
+        discussion_framework = analysis_state.get("discussion_framework") or {}
+        if discussion_framework:
+            with st.expander("Discussion framework from Results", expanded=True):
+                provider = discussion_framework.get("framework_provider") or ""
+                model_used = discussion_framework.get("framework_model") or ""
+                if provider or model_used:
+                    st.caption(f"Framework engine: {provider} {model_used}".strip())
+                if discussion_framework.get("claude_framework_error"):
+                    st.warning(f"Claude framework warning: {discussion_framework.get('claude_framework_error')}")
+                if discussion_framework.get("style_priority"):
+                    st.write("Style priority")
+                    st.write(discussion_framework.get("style_priority"))
+                if discussion_framework.get("discussion_thesis"):
+                    st.write("Discussion thesis")
+                    st.write(discussion_framework.get("discussion_thesis"))
+                paragraph_framework = discussion_framework.get("paragraph_framework") or []
+                if paragraph_framework:
+                    st.write("Paragraph framework")
+                    for item in paragraph_framework:
+                        st.write(item)
+                citation_strategy = discussion_framework.get("citation_strategy") or []
+                if citation_strategy:
+                    st.write("Citation strategy")
+                    for item in citation_strategy:
+                        st.write(item)
 
         claude_plan = analysis_state.get("claude_discussion_search_plan") or {}
         if claude_plan:

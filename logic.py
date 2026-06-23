@@ -988,6 +988,8 @@ def generate_claude_discussion_search_plan(
     context_text: str,
     result_text: str,
     style_profile: dict[str, Any] | None = None,
+    results_section: str = "",
+    discussion_framework: dict[str, Any] | None = None,
     max_queries: int = 8,
 ) -> dict[str, Any]:
     fallback = {
@@ -1016,6 +1018,12 @@ Methodology, research context, and user notes:
 Result evidence:
 {truncate_text(result_text, 12000)}
 
+Results section drafted from the uploaded findings:
+{truncate_text(results_section, 9000)}
+
+Discussion framework already planned from title, methodology, and Results:
+{json.dumps(discussion_framework or {}, ensure_ascii=True)[:18000]}
+
 Selected author writing-style contract:
 {json.dumps(style_profile or {}, ensure_ascii=True)[:18000]}
 
@@ -1023,6 +1031,7 @@ Create a Discussion-first evidence plan.
 
 Rules:
 - Decide what type of paper is needed for each important finding before making queries.
+- Use the drafted Results and Discussion framework as the primary guide for query design.
 - Prefer original primary research papers for specific comparisons with our results.
 - Use review papers for broad synthesis, mechanism, and framing only.
 - Use theses only for RoL/source-mining queries, especially Krishikosh-style Indian theses; do not plan to cite the thesis itself.
