@@ -721,45 +721,23 @@ with tabs[2]:
     )
     top[4].metric("AI scoring", "On" if st.session_state.use_ai_scoring else "Off")
 
-    if st.button("Analyze findings and search papers", type="primary", width="stretch"):
+    st.markdown("### Results-First Planning")
+    if st.button("Analyze findings, write Results, and build Discussion Framework", type="primary", width="stretch"):
         if not (inputs["master_context"] or inputs["raw_methodology"] or extracted_files):
-            st.warning("Add methodology, master context, or result files before searching.")
+            st.warning("Add methodology, master context, or result files before analyzing.")
         else:
             with st.spinner(
-                "Analyzing findings, writing Results, building the Discussion framework, planning evidence, searching, deduplicating, and scoring papers..."
+                "Analyzing findings, writing Results, building the Discussion framework, and asking Claude to plan the evidence search..."
             ):
                 analysis, result_text, queries = build_context_for_search(inputs, extracted_files)
-                context_text = current_context_text(inputs, extracted_files, analysis)
-                search_result = search_and_rank_papers(
-                    queries=queries,
-                    context_text=context_text,
-                    semantic_key=st.session_state.semantic_key,
-                    serpapi_key=st.session_state.serpapi_key,
-                    core_key=st.session_state.core_key,
-                    perplexity_key=st.session_state.perplexity_key,
-                    perplexity_model=st.session_state.perplexity_model,
-                    openai_key=st.session_state.openai_key,
-                    model=st.session_state.model,
-                    reference_count=st.session_state.reference_count,
-                    per_query_limit=st.session_state.per_query_limit,
-                    use_ai_scoring=st.session_state.use_ai_scoring,
-                )
             st.session_state.analysis = analysis
             st.session_state.queries = queries
-            st.session_state.paper_search = search_result
-            st.session_state.selected_papers = search_result.get("selected", [])
+            st.session_state.paper_search = {}
+            st.session_state.selected_papers = []
             st.session_state.downloaded_references = []
             st.session_state.gemini_recommendations = {}
-            st.success(
-                f"Found {search_result.get('candidate_count', 0)} candidates, "
-                f"{search_result.get('deduped_count', 0)} after deduplication, "
-                f"{len(st.session_state.selected_papers)} selected."
-            )
-
-    if st.session_state.get("queries"):
-        with st.expander("Search queries", expanded=True):
-            for query in st.session_state.queries:
-                st.code(query, language="text")
+            st.session_state.followup_suggestions = {}
+            st.success("Results draft, Discussion framework, and Claude evidence plan are ready below.")
 
     analysis_state = st.session_state.get("analysis") or {}
     if analysis_state:
@@ -845,6 +823,42 @@ with tabs[2]:
                     st.write("Questions to answer through reading")
                     for item in missing_questions:
                         st.write(item)
+
+    if st.session_state.get("queries"):
+        with st.expander("Search queries from Results and Discussion plan", expanded=True):
+            for query in st.session_state.queries:
+                st.code(query, language="text")
+
+        st.divider()
+        st.subheader("Search Papers From This Plan")
+        st.caption("Run this after reviewing the Results draft, Discussion framework, and Claude evidence plan above.")
+        if st.button("Search papers using these planned queries", type="primary", width="stretch"):
+            analysis = st.session_state.get("analysis") or {}
+            context_text = current_context_text(inputs, extracted_files, analysis)
+            with st.spinner("Searching, deduplicating, and scoring papers from the planned Discussion queries..."):
+                search_result = search_and_rank_papers(
+                    queries=st.session_state.queries,
+                    context_text=context_text,
+                    semantic_key=st.session_state.semantic_key,
+                    serpapi_key=st.session_state.serpapi_key,
+                    core_key=st.session_state.core_key,
+                    perplexity_key=st.session_state.perplexity_key,
+                    perplexity_model=st.session_state.perplexity_model,
+                    openai_key=st.session_state.openai_key,
+                    model=st.session_state.model,
+                    reference_count=st.session_state.reference_count,
+                    per_query_limit=st.session_state.per_query_limit,
+                    use_ai_scoring=st.session_state.use_ai_scoring,
+                )
+            st.session_state.paper_search = search_result
+            st.session_state.selected_papers = search_result.get("selected", [])
+            st.session_state.downloaded_references = []
+            st.session_state.gemini_recommendations = {}
+            st.success(
+                f"Found {search_result.get('candidate_count', 0)} candidates, "
+                f"{search_result.get('deduped_count', 0)} after deduplication, "
+                f"{len(st.session_state.selected_papers)} selected."
+            )
 
     search_result = st.session_state.get("paper_search") or {}
     deep_queries = search_result.get("deep_queries") or {}
