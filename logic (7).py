@@ -1048,7 +1048,13 @@ missing_evidence_questions: array of brief questions the app should answer throu
         parsed = parse_json_object(text, fallback)
         for key, value in fallback.items():
             parsed.setdefault(key, value)
-        queries = [str(query).strip() for query in parsed.get("discussion_search_queries", []) if str(query).strip()]
+        queries = []
+        for query in parsed.get("discussion_search_queries", []):
+            if isinstance(query, dict):
+                query = query.get("query") or query.get("search_query") or query.get("title") or ""
+            clean_query = str(query).strip()
+            if clean_query:
+                queries.append(clean_query)
         parsed["discussion_search_queries"] = queries[:max_queries]
         parsed["query_provider"] = "Claude"
         parsed["model_used"] = claude_model or DEFAULT_CLAUDE_MODEL

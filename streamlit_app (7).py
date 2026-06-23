@@ -281,7 +281,7 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
     seen_queries = set()
     for query_group in (base_queries, claude_queries):
         for query in query_group:
-            clean_query = str(query).strip()
+            clean_query = clean_query_text(query)
             normalized_query = " ".join(clean_query.lower().split())
             if clean_query and normalized_query not in seen_queries:
                 queries.append(clean_query)
@@ -303,6 +303,12 @@ def current_context_text(inputs: dict, files, analysis: dict | None = None) -> s
             " ".join(map(str, analysis.get("keywords", []))),
         ]
     )
+
+
+def clean_query_text(query) -> str:
+    if isinstance(query, dict):
+        query = query.get("query") or query.get("search_query") or query.get("title") or ""
+    return str(query).strip()
 
 
 def paper_rows(papers: list[dict]) -> pd.DataFrame:
@@ -1104,7 +1110,11 @@ with tabs[3]:
                 st.caption(f"Suggestion engine: {suggestions.get('query_provider')}{model_note}")
             if suggestions.get("claude_query_error"):
                 st.warning(f"Claude follow-up planning warning: {suggestions.get('claude_query_error')}")
-            search_queries = [str(q).strip() for q in suggestions.get("suggested_search_queries", []) if str(q).strip()]
+            search_queries = [
+                clean_query_text(query)
+                for query in suggestions.get("suggested_search_queries", [])
+                if clean_query_text(query)
+            ]
             if suggestions.get("style_plan"):
                 with st.expander("Selected-style writing plan", expanded=True):
                     for item in suggestions.get("style_plan", []):
