@@ -37,6 +37,7 @@ from logic import (
     merge_search_results,
     recommend_writing_style,
     revise_draft_with_style_audits,
+    review_primary_study_search_queries,
     search_and_rank_papers,
     suggest_style_aligned_followup_needs,
     summarize_gemini_reference_notes,
@@ -863,6 +864,63 @@ with tabs[3]:
             if review:
                 with st.expander("Review paper to use", expanded=True):
                     st.write(review)
+
+            review_insights = recommendations.get("review_discussion_insights") or []
+            if review_insights:
+                with st.expander("Review-paper insights for Discussion", expanded=True):
+                    for insight in review_insights[:20]:
+                        st.write(insight)
+
+            review_reference_leads = recommendations.get("review_reference_leads") or []
+            if review_reference_leads:
+                with st.expander("Original references found inside review papers", expanded=True):
+                    for lead in review_reference_leads[:30]:
+                        st.write(lead)
+
+            review_primary_leads = recommendations.get("review_primary_study_leads") or []
+            if review_primary_leads:
+                with st.expander("Primary-study leads extracted from review bibliographies", expanded=True):
+                    for lead in review_primary_leads[:30]:
+                        st.write(lead)
+                review_queries = review_primary_study_search_queries(
+                    review_primary_leads,
+                    current_context_text(inputs, extracted_files),
+                )
+                if review_queries:
+                    with st.expander("Primary-paper search queries from review bibliographies", expanded=False):
+                        for query in review_queries:
+                            st.code(query, language="text")
+                    if st.button("Search original papers from review references now", type="primary", width="stretch"):
+                        context_text = current_context_text(inputs, extracted_files)
+                        with st.spinner("Searching original primary papers named or implied in review bibliographies..."):
+                            extra_search = search_and_rank_papers(
+                                queries=review_queries,
+                                context_text=context_text,
+                                semantic_key=st.session_state.semantic_key,
+                                serpapi_key=st.session_state.serpapi_key,
+                                core_key=st.session_state.core_key,
+                                perplexity_key=st.session_state.perplexity_key,
+                                perplexity_model=st.session_state.perplexity_model,
+                                openai_key=st.session_state.openai_key,
+                                model=st.session_state.model,
+                                reference_count=st.session_state.reference_count,
+                                per_query_limit=st.session_state.per_query_limit,
+                                use_ai_scoring=st.session_state.use_ai_scoring,
+                            )
+                        st.session_state.paper_search = merge_search_results(
+                            st.session_state.get("paper_search") or {},
+                            extra_search,
+                            st.session_state.reference_count,
+                        )
+                        st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
+                        selected_ids = {str(item.get("paper_id")) for item in st.session_state.selected_papers}
+                        st.session_state.downloaded_references = [
+                            item for item in st.session_state.get("downloaded_references", [])
+                            if str(item.get("paper_id")) in selected_ids
+                        ]
+                        st.success(
+                            f"Merged review-bibliography primary-paper search. Selected {len(st.session_state.selected_papers)} sources."
+                        )
 
             thesis_leads = recommendations.get("thesis_reference_leads") or []
             if thesis_leads:
