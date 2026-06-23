@@ -261,7 +261,7 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
     )
     result_title = inputs["paper_title"] or analysis.get("generated_title") or "Research Paper Draft"
     analysis["analysis_title"] = result_title
-    styles = current_style_sections()
+    styles = current_style_library()
     common = section_prompt_common(
         result_title,
         inputs.get("authors", ""),
