@@ -34,6 +34,7 @@ APP_ROOT = Path(__file__).resolve().parent
 STYLE_LIBRARY_DIR = APP_ROOT / "style_library"
 AUTHOR_STYLE_DIR = APP_ROOT / "styles"
 SAU_ICAR_RESULTS_PROMPT_PATH = APP_ROOT / "master_prompt.md"
+SAU_ICAR_REFERENCE_STYLE_GUIDE_PATH = APP_ROOT / "reference_style_guide.md"
 OUTPUT_DIR = APP_ROOT / "outputs"
 DOWNLOADED_REFERENCES_DIR = APP_ROOT / "downloaded_references"
 SSL_VERIFY = os.getenv("RP_APP_VERIFY_SSL", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -80,10 +81,23 @@ SAU_ICAR_RESULTS_PROMPT_FALLBACK = """SAU/ICAR thesis Results writing rules:
 
 def load_sau_icar_results_prompt() -> str:
     try:
-        text = SAU_ICAR_RESULTS_PROMPT_PATH.read_text(encoding="utf-8")
-        return text.strip() or SAU_ICAR_RESULTS_PROMPT_FALLBACK
+        master_text = SAU_ICAR_RESULTS_PROMPT_PATH.read_text(encoding="utf-8").strip()
     except Exception:
-        return SAU_ICAR_RESULTS_PROMPT_FALLBACK
+        master_text = SAU_ICAR_RESULTS_PROMPT_FALLBACK
+
+    try:
+        reference_text = SAU_ICAR_REFERENCE_STYLE_GUIDE_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        reference_text = ""
+
+    if reference_text:
+        return (
+            f"{master_text or SAU_ICAR_RESULTS_PROMPT_FALLBACK}\n\n"
+            "---\n\n"
+            "Supplementary reference style guide. Use only as secondary support; the master prompt controls.\n\n"
+            f"{reference_text}"
+        ).strip()
+    return master_text or SAU_ICAR_RESULTS_PROMPT_FALLBACK
 
 
 DEFAULT_NARANJO_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Steven E. Naranjo.docx")
