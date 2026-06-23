@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import importlib
 import os
 
 import pandas as pd
 import streamlit as st
+
+import logic as logic_module
+
+importlib.reload(logic_module)
 
 from logic import (
     DEFAULT_GEMINI_MODEL,
