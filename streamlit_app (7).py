@@ -391,6 +391,33 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+PAPER_TABLE_DISABLED_COLUMNS = [
+    "rank",
+    "score",
+    "category",
+    "citation",
+    "year",
+    "citations",
+    "pdf",
+    "full_text_chars",
+    "source",
+    "title",
+    "reason",
+    "paper_id",
+]
+
+
+def paper_selection_editor(papers: list[dict], key: str) -> pd.DataFrame:
+    return st.data_editor(
+        paper_rows(papers),
+        width="stretch",
+        hide_index=True,
+        disabled=PAPER_TABLE_DISABLED_COLUMNS,
+        column_config={"selected": st.column_config.CheckboxColumn("Use")},
+        key=key,
+    )
+
+
 init_state()
 
 with st.sidebar:
@@ -913,29 +940,38 @@ with tabs[2]:
         count_cols[0].metric("Research articles", category_counts.get("Research Article", 0))
         count_cols[1].metric("Review papers", category_counts.get("Review Paper", 0))
         count_cols[2].metric("Theses", category_counts.get("Thesis", 0))
-        st.caption("Sort columns in the table and tick Use for references that should support the paper.")
-        edited = st.data_editor(
-            df,
-            width="stretch",
-            hide_index=True,
-            disabled=[
-                "rank",
-                "score",
-                "category",
-                "citation",
-                "year",
-                "citations",
-                "pdf",
-                "full_text_chars",
-                "source",
-                "title",
-                "reason",
-                "paper_id",
-            ],
-            column_config={"selected": st.column_config.CheckboxColumn("Use")},
+        st.caption(
+            "Select sources separately by type. The app will merge the chosen research papers, review papers, and theses for downloading, Gemini reading, and drafting."
         )
-        if st.button("Save selected papers", width="stretch"):
-            selected_ids = set(edited.loc[edited["selected"] == True, "paper_id"].astype(str).tolist())
+        category_sections = [
+            ("Research papers", "Research Article", "research_articles"),
+            ("Review papers", "Review Paper", "review_papers"),
+            ("Theses / dissertations", "Thesis", "theses"),
+        ]
+        known_categories = {category for _label, category, _key in category_sections}
+        other_papers = [paper for paper in papers if paper.get("category", "Research Article") not in known_categories]
+        if other_papers:
+            category_sections.append(("Other sources", "__OTHER__", "other_sources"))
+
+        edited_frames = []
+        selection_tabs = st.tabs([label for label, _category, _key in category_sections])
+        for tab, (label, category, key_suffix) in zip(selection_tabs, category_sections):
+            with tab:
+                if category == "__OTHER__":
+                    category_papers = other_papers
+                else:
+                    category_papers = [paper for paper in papers if paper.get("category", "Research Article") == category]
+                selected_in_category = len([paper for paper in category_papers if paper.get("selected")])
+                st.caption(f"{len(category_papers)} found; {selected_in_category} currently selected.")
+                if category_papers:
+                    edited_frames.append(paper_selection_editor(category_papers, f"evidence_select_{key_suffix}"))
+                else:
+                    st.info(f"No {label.lower()} found yet.")
+
+        if st.button("Save selected sources from all sections", width="stretch"):
+            selected_ids = set()
+            for edited in edited_frames:
+                selected_ids.update(edited.loc[edited["selected"] == True, "paper_id"].astype(str).tolist())
             selected = []
             for paper in papers:
                 paper["selected"] = str(paper.get("paper_id")) in selected_ids
@@ -946,7 +982,14 @@ with tabs[2]:
             st.session_state.downloaded_references = [
                 item for item in st.session_state.get("downloaded_references", []) if str(item.get("paper_id")) in selected_ids
             ]
-            st.success(f"Saved {len(selected)} selected paper(s).")
+            selected_summary = pd.DataFrame(
+                [
+                    {"category": category, "selected": len([p for p in selected if p.get("category") == category])}
+                    for category in ["Research Article", "Review Paper", "Thesis"]
+                ]
+            )
+            st.success(f"Saved {len(selected)} selected source(s) from separate evidence sections.")
+            st.dataframe(selected_summary, width="stretch", hide_index=True)
 
         selected_papers = st.session_state.get("selected_papers", [])
         if selected_papers:
