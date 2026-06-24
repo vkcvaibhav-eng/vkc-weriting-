@@ -1315,7 +1315,12 @@ def generate_claude_discussion_search_plan(
         "query_provider": "",
         "model_used": "",
         "needed_paper_types": [],
+        "section_evidence_plan": [],
+        "introduction_search_queries": [],
+        "methodology_search_queries": [],
         "discussion_search_queries": [],
+        "review_mining_queries": [],
+        "thesis_mining_queries": [],
         "query_rationale": [],
         "missing_evidence_questions": [],
         "claude_query_error": "",
@@ -1346,21 +1351,30 @@ Discussion framework already planned from title, methodology, and Results:
 Selected author writing-style contract:
 {json.dumps(compact_style_profile_for_api(style_profile, "planning"), ensure_ascii=True)[:12000]}
 
-Create a Discussion-first evidence plan.
+Create a section-wise manuscript evidence plan. The Discussion is the deepest evidence target,
+but Introduction and Methodology must also receive their own reference-finding logic.
 
 Rules:
-- Decide what type of paper is needed for each important finding before making queries.
-- Use the drafted Results and Discussion framework as the primary guide for query design.
-- Prefer original primary research papers for specific comparisons with our results.
-- Use review papers for broad synthesis, mechanism, and framing only.
-- Use theses only for RoL/source-mining queries, especially Krishikosh-style Indian theses; do not plan to cite the thesis itself.
+- Decide what type of paper is needed for each manuscript section before making queries.
+- For Introduction, find references for crop/pest importance, damage/yield loss, distribution, research gap, and objective framing.
+- For Methodology, find references for method justification, experimental design, observation method, treatment/material choice, sampling, and statistics.
+- For Discussion, use the drafted Results and Discussion framework as the primary guide: each query must help explain, validate, contrast, or contextualize a finding.
+- Prefer original primary research papers for direct result comparisons and final citation.
+- Use review papers for broad synthesis, mechanism, framing, and finding original bibliography leads.
+- Use theses only for RoL/source-mining queries, especially Krishikosh-style Indian theses; do not plan to cite the thesis itself unless no primary source is available.
 - Queries must include crop/host, pest/pathogen/organism, treatment/method, measured response, geography, or system terms when known.
 - Avoid generic topic-only queries.
 - Make queries that can work in Google Scholar, SerpAPI, Semantic Scholar, ResearchGate public pages, CORE, Perplexity, and thesis repositories.
+- Each section_evidence_plan item must tell the user why that basket exists and what Gemini should extract after download/reading.
 
 Return only a JSON object with keys:
 needed_paper_types: array of objects with finding, paper_type, why_needed;
+section_evidence_plan: array of objects with section, evidence_need, source_type_needed, query, why_needed, direct_citation_policy, what_to_extract, writing_use;
+introduction_search_queries: array of 3-5 precise scholarly search queries;
+methodology_search_queries: array of 2-4 precise scholarly search queries;
 discussion_search_queries: array of {max_queries} precise scholarly search queries;
+review_mining_queries: array of 2-4 review-paper mining queries;
+thesis_mining_queries: array of 2-4 thesis/RoL mining queries;
 query_rationale: array of objects with query, target_evidence, why_this_query;
 missing_evidence_questions: array of brief questions the app should answer through search or reading.
 """
@@ -1376,14 +1390,47 @@ missing_evidence_questions: array of brief questions the app should answer throu
         parsed = parse_json_object(text, fallback)
         for key, value in fallback.items():
             parsed.setdefault(key, value)
-        queries = []
-        for query in parsed.get("discussion_search_queries", []):
-            if isinstance(query, dict):
-                query = query.get("query") or query.get("search_query") or query.get("title") or ""
-            clean_query = str(query).strip()
-            if clean_query:
-                queries.append(clean_query)
-        parsed["discussion_search_queries"] = queries[:max_queries]
+        def clean_query_items(items: Any, limit: int) -> list[str]:
+            queries: list[str] = []
+            seen: set[str] = set()
+            if not isinstance(items, list):
+                return []
+            for query in items:
+                if isinstance(query, dict):
+                    query = query.get("query") or query.get("search_query") or query.get("title") or ""
+                clean_query = str(query).strip()
+                normalized = re.sub(r"\s+", " ", clean_query.lower())
+                if clean_query and normalized not in seen:
+                    queries.append(clean_query)
+                    seen.add(normalized)
+            return queries[:limit]
+
+        parsed["introduction_search_queries"] = clean_query_items(parsed.get("introduction_search_queries"), 5)
+        parsed["methodology_search_queries"] = clean_query_items(parsed.get("methodology_search_queries"), 4)
+        parsed["discussion_search_queries"] = clean_query_items(parsed.get("discussion_search_queries"), max_queries)
+        parsed["review_mining_queries"] = clean_query_items(parsed.get("review_mining_queries"), 4)
+        parsed["thesis_mining_queries"] = clean_query_items(parsed.get("thesis_mining_queries"), 4)
+        plan_items = []
+        for item in parsed.get("section_evidence_plan") or []:
+            if not isinstance(item, dict):
+                continue
+            query = str(item.get("query") or item.get("search_query") or "").strip()
+            section = str(item.get("section") or "Discussion").strip() or "Discussion"
+            evidence_need = str(item.get("evidence_need") or item.get("target_evidence") or "").strip()
+            source_type = str(item.get("source_type_needed") or item.get("paper_type") or "").strip()
+            plan_items.append(
+                {
+                    "section": section,
+                    "evidence_need": evidence_need,
+                    "source_type_needed": source_type,
+                    "query": query,
+                    "why_needed": str(item.get("why_needed") or item.get("rationale") or "").strip(),
+                    "direct_citation_policy": str(item.get("direct_citation_policy") or item.get("citation_policy") or "").strip(),
+                    "what_to_extract": str(item.get("what_to_extract") or item.get("extraction_target") or "").strip(),
+                    "writing_use": str(item.get("writing_use") or item.get("use_in_writing") or "").strip(),
+                }
+            )
+        parsed["section_evidence_plan"] = plan_items
         parsed["query_provider"] = "Claude"
         parsed["model_used"] = claude_model or DEFAULT_CLAUDE_MODEL
         return parsed

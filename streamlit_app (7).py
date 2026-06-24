@@ -330,9 +330,15 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         discussion_framework=discussion_framework,
         max_queries=8,
     )
-    claude_queries = claude_plan.get("discussion_search_queries") or []
-    if claude_plan.get("needed_paper_types") or claude_queries or claude_plan.get("claude_query_error"):
+    claude_queries = collect_plan_queries(claude_plan)
+    if (
+        claude_plan.get("needed_paper_types")
+        or claude_plan.get("section_evidence_plan")
+        or claude_queries
+        or claude_plan.get("claude_query_error")
+    ):
         analysis["claude_discussion_search_plan"] = claude_plan
+        analysis["section_evidence_plan"] = section_plan_items_from_analysis(analysis)
 
     queries = []
     seen_queries = set()
@@ -343,6 +349,7 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
             if clean_query and normalized_query not in seen_queries:
                 queries.append(clean_query)
                 seen_queries.add(normalized_query)
+    analysis["section_evidence_plan"] = section_plan_items_from_analysis(analysis, queries)
     return analysis, result_text, queries
 
 
@@ -368,6 +375,359 @@ def clean_query_text(query) -> str:
     return str(query).strip()
 
 
+EVIDENCE_SECTION_ORDER = ["Introduction", "Methodology", "Discussion", "Other"]
+
+SOURCE_TYPE_SECTIONS = [
+    ("Research papers", "Research Article", "research_papers"),
+    ("Review papers", "Review Paper", "review_papers"),
+    ("Theses / RoL mining", "Thesis", "thesis_sources"),
+]
+
+
+def normalize_match_text(value) -> str:
+    return " ".join(str(value or "").lower().replace("/", " ").replace("-", " ").split())
+
+
+def evidence_tokens(value) -> set[str]:
+    tokens = set()
+    for token in normalize_match_text(value).split():
+        if len(token) > 2:
+            tokens.add(token)
+    return tokens
+
+
+def normalize_evidence_section(value) -> str:
+    text = normalize_match_text(value)
+    if any(term in text for term in ["intro", "background", "gap", "objective", "importance"]):
+        return "Introduction"
+    if any(term in text for term in ["method", "material", "design", "sampling", "observation", "statistic"]):
+        return "Methodology"
+    if any(term in text for term in ["discuss", "interpret", "comparison", "mechanism", "finding", "result"]):
+        return "Discussion"
+    return "Other" if text else "Discussion"
+
+
+def normalize_source_type(value, category: str = "") -> str:
+    text = normalize_match_text(value or category)
+    if any(term in text for term in ["thesis", "dissertation", "krishikosh", "rol"]):
+        return "Thesis"
+    if "review" in text:
+        return "Review Paper"
+    if any(term in text for term in ["research", "primary", "article", "paper", "study"]):
+        return "Research Article"
+    return category or "Research Article"
+
+
+def source_type_from_category(category: str) -> str:
+    return normalize_source_type(category, category or "Research Article")
+
+
+def citation_policy_for_category(category: str) -> str:
+    source_type = source_type_from_category(category)
+    if source_type == "Thesis":
+        return "Mine the Review of Literature and bibliography for original studies; do not cite the thesis directly unless unavoidable."
+    if source_type == "Review Paper":
+        return "Use for synthesis, mechanisms, and bibliography mining; cite the review only for broad framing."
+    return "Use as a direct primary citation when it matches the finding, method, or claim."
+
+
+def infer_evidence_section_from_text(text: str, category: str = "") -> str:
+    combined = normalize_match_text(f"{text} {category}")
+    methodology_terms = [
+        "method",
+        "materials",
+        "design",
+        "rcbd",
+        "rbd",
+        "crd",
+        "replication",
+        "sampling",
+        "observation",
+        "statistical",
+        "analysis",
+        "formula",
+        "estimation",
+        "spray",
+        "treatment",
+    ]
+    introduction_terms = [
+        "importance",
+        "status",
+        "incidence",
+        "distribution",
+        "damage",
+        "yield loss",
+        "crop loss",
+        "economic",
+        "host",
+        "background",
+        "review",
+        "objective",
+    ]
+    discussion_terms = [
+        "effect",
+        "efficacy",
+        "significant",
+        "mechanism",
+        "comparison",
+        "at par",
+        "mortality",
+        "population",
+        "yield",
+        "explain",
+        "discuss",
+    ]
+    if any(term in combined for term in methodology_terms):
+        return "Methodology"
+    if any(term in combined for term in discussion_terms):
+        return "Discussion"
+    if any(term in combined for term in introduction_terms):
+        return "Introduction"
+    return "Discussion"
+
+
+def fallback_evidence_need(section: str, category: str) -> str:
+    source_type = source_type_from_category(category)
+    if section == "Introduction":
+        if source_type == "Thesis":
+            return "Find RoL leads for crop/pest importance, damage history, and research-gap support."
+        if source_type == "Review Paper":
+            return "Support broad background, pest importance, distribution, and knowledge-gap framing."
+        return "Support crop/pest importance, damage/yield-loss evidence, and objective justification."
+    if section == "Methodology":
+        if source_type == "Thesis":
+            return "Mine methods used in similar Indian agricultural thesis work for comparable design and observations."
+        if source_type == "Review Paper":
+            return "Locate accepted measurement, observation, or analytical conventions."
+        return "Justify experimental method, treatment choice, sampling, observations, and statistical approach."
+    if source_type == "Thesis":
+        return "Mine Review of Literature and references for original studies that explain or compare with our Results."
+    if source_type == "Review Paper":
+        return "Extract mechanisms, synthesis points, and original reference leads for the Discussion."
+    return "Compare, validate, contrast, or explain our specific Results with primary studies."
+
+
+def fallback_extract_target(section: str, category: str) -> str:
+    source_type = source_type_from_category(category)
+    if source_type == "Thesis":
+        return "Review of Literature chronology, objective/result matches, and bibliography leads to original papers."
+    if source_type == "Review Paper":
+        return "Mechanisms, synthesis statements, evidence gaps, and original references worth searching again."
+    if section == "Methodology":
+        return "Design, treatment/material details, observation method, sampling unit, timing, and statistics."
+    if section == "Introduction":
+        return "Crop/pest importance, damage level, distribution, research gap, and objective framing evidence."
+    return "Comparable finding, direction of agreement/disagreement, mechanism, citation details, and implication."
+
+
+def fallback_writing_use(section: str, category: str) -> str:
+    source_type = source_type_from_category(category)
+    if source_type == "Thesis":
+        return f"Use mined original studies to strengthen the {section}; keep thesis itself outside final references unless necessary."
+    if source_type == "Review Paper":
+        return f"Use for {section} synthesis and to locate primary studies for final citation."
+    return f"Use as direct support in the {section} when the paper closely matches the claim."
+
+
+def collect_plan_queries(claude_plan: dict) -> list[str]:
+    queries = []
+    for key in [
+        "introduction_search_queries",
+        "methodology_search_queries",
+        "discussion_search_queries",
+        "review_mining_queries",
+        "thesis_mining_queries",
+    ]:
+        for query in claude_plan.get(key) or []:
+            clean_query = clean_query_text(query)
+            if clean_query:
+                queries.append(clean_query)
+    for item in claude_plan.get("section_evidence_plan") or []:
+        if isinstance(item, dict):
+            clean_query = clean_query_text(item.get("query") or item.get("search_query"))
+            if clean_query:
+                queries.append(clean_query)
+    return queries
+
+
+def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] | None = None) -> list[dict]:
+    analysis = analysis or {}
+    claude_plan = analysis.get("claude_discussion_search_plan") or {}
+    raw_items = analysis.get("section_evidence_plan") or claude_plan.get("section_evidence_plan") or []
+    items = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        query = clean_query_text(item.get("query") or item.get("search_query"))
+        section = normalize_evidence_section(item.get("section"))
+        source_type = normalize_source_type(item.get("source_type_needed") or item.get("paper_type"))
+        evidence_need = str(item.get("evidence_need") or item.get("target_evidence") or fallback_evidence_need(section, source_type)).strip()
+        items.append(
+            {
+                "section": section,
+                "source_type_needed": source_type,
+                "query": query,
+                "evidence_need": evidence_need,
+                "why_needed": str(item.get("why_needed") or item.get("rationale") or evidence_need).strip(),
+                "direct_citation_policy": str(
+                    item.get("direct_citation_policy") or item.get("citation_policy") or citation_policy_for_category(source_type)
+                ).strip(),
+                "what_to_extract": str(item.get("what_to_extract") or fallback_extract_target(section, source_type)).strip(),
+                "writing_use": str(item.get("writing_use") or fallback_writing_use(section, source_type)).strip(),
+            }
+        )
+
+    if items:
+        return items
+
+    grouped_queries = [
+        ("Introduction", "Research Article", claude_plan.get("introduction_search_queries") or []),
+        ("Methodology", "Research Article", claude_plan.get("methodology_search_queries") or []),
+        ("Discussion", "Research Article", claude_plan.get("discussion_search_queries") or []),
+        ("Discussion", "Review Paper", claude_plan.get("review_mining_queries") or []),
+        ("Discussion", "Thesis", claude_plan.get("thesis_mining_queries") or []),
+    ]
+    for section, source_type, query_group in grouped_queries:
+        for query in query_group:
+            clean_query = clean_query_text(query)
+            if not clean_query:
+                continue
+            items.append(
+                {
+                    "section": section,
+                    "source_type_needed": source_type,
+                    "query": clean_query,
+                    "evidence_need": fallback_evidence_need(section, source_type),
+                    "why_needed": fallback_evidence_need(section, source_type),
+                    "direct_citation_policy": citation_policy_for_category(source_type),
+                    "what_to_extract": fallback_extract_target(section, source_type),
+                    "writing_use": fallback_writing_use(section, source_type),
+                }
+            )
+
+    if items:
+        return items
+
+    for query in queries or []:
+        clean_query = clean_query_text(query)
+        if not clean_query:
+            continue
+        source_type = normalize_source_type(clean_query)
+        section = infer_evidence_section_from_text(clean_query, source_type)
+        items.append(
+            {
+                "section": section,
+                "source_type_needed": source_type,
+                "query": clean_query,
+                "evidence_need": fallback_evidence_need(section, source_type),
+                "why_needed": fallback_evidence_need(section, source_type),
+                "direct_citation_policy": citation_policy_for_category(source_type),
+                "what_to_extract": fallback_extract_target(section, source_type),
+                "writing_use": fallback_writing_use(section, source_type),
+            }
+        )
+    return items
+
+
+def query_match_score(paper_query: str, plan_query: str) -> float:
+    paper_text = normalize_match_text(paper_query)
+    plan_text = normalize_match_text(plan_query)
+    if not paper_text or not plan_text:
+        return 0.0
+    if paper_text == plan_text:
+        return 3.0
+    if paper_text in plan_text or plan_text in paper_text:
+        return 2.0
+    paper_tokens = evidence_tokens(paper_text)
+    plan_tokens = evidence_tokens(plan_text)
+    if not paper_tokens or not plan_tokens:
+        return 0.0
+    overlap = len(paper_tokens & plan_tokens)
+    return overlap / max(1, min(len(paper_tokens), len(plan_tokens)))
+
+
+def match_plan_item_for_paper(paper: dict, plan_items: list[dict]) -> dict | None:
+    paper_query = (
+        paper.get("query")
+        or paper.get("source_query")
+        or paper.get("search_query")
+        or paper.get("found_query")
+        or paper.get("title")
+        or ""
+    )
+    actual_type = source_type_from_category(paper.get("category", "Research Article"))
+    best_item = None
+    best_score = 0.0
+    for item in plan_items:
+        score = query_match_score(str(paper_query), item.get("query", ""))
+        planned_type = normalize_source_type(item.get("source_type_needed"))
+        if planned_type == actual_type:
+            score += 0.15
+        if score > best_score:
+            best_item = item
+            best_score = score
+    return best_item if best_score >= 0.25 else None
+
+
+def annotate_papers_with_evidence_plan(papers: list[dict], analysis: dict | None, queries: list[str] | None = None) -> list[dict]:
+    plan_items = section_plan_items_from_analysis(analysis, queries)
+    for paper in papers:
+        actual_type = source_type_from_category(paper.get("category", "Research Article"))
+        found_query = clean_query_text(
+            paper.get("query") or paper.get("source_query") or paper.get("search_query") or paper.get("found_query") or ""
+        )
+        match = match_plan_item_for_paper(paper, plan_items)
+        section = normalize_evidence_section(match.get("section")) if match else infer_evidence_section_from_text(found_query or paper.get("title", ""), actual_type)
+        paper["evidence_section"] = section
+        paper["source_type_needed"] = match.get("source_type_needed") if match else actual_type
+        paper["evidence_need"] = match.get("evidence_need") if match else fallback_evidence_need(section, actual_type)
+        paper["citation_policy"] = match.get("direct_citation_policy") if match else citation_policy_for_category(actual_type)
+        paper["why_needed"] = match.get("why_needed") if match else paper["evidence_need"]
+        paper["what_to_extract"] = match.get("what_to_extract") if match else fallback_extract_target(section, actual_type)
+        paper["writing_use"] = match.get("writing_use") if match else fallback_writing_use(section, actual_type)
+        paper["found_query"] = found_query
+    return papers
+
+
+def annotate_search_result_with_evidence_plan(search_result: dict, analysis: dict | None, queries: list[str] | None = None) -> dict:
+    search_result = search_result or {}
+    plan_items = section_plan_items_from_analysis(analysis, queries)
+    papers = annotate_papers_with_evidence_plan(search_result.get("papers", []), analysis, queries)
+    selected = annotate_papers_with_evidence_plan(search_result.get("selected", []), analysis, queries)
+    search_result["papers"] = papers
+    search_result["selected"] = selected
+    search_result["section_evidence_plan"] = plan_items
+    return search_result
+
+
+def evidence_plan_rows(plan_items: list[dict], section: str | None = None) -> pd.DataFrame:
+    rows = []
+    for item in plan_items:
+        item_section = normalize_evidence_section(item.get("section"))
+        if section and item_section != section:
+            continue
+        rows.append(
+            {
+                "section": item_section,
+                "source_type": normalize_source_type(item.get("source_type_needed")),
+                "evidence_need": item.get("evidence_need", ""),
+                "query": item.get("query", ""),
+                "why_needed": item.get("why_needed", ""),
+                "what_to_extract": item.get("what_to_extract", ""),
+                "writing_use": item.get("writing_use", ""),
+                "citation_policy": item.get("direct_citation_policy", ""),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def section_sort_key(section: str) -> int:
+    try:
+        return EVIDENCE_SECTION_ORDER.index(section)
+    except ValueError:
+        return len(EVIDENCE_SECTION_ORDER)
+
+
 def paper_rows(papers: list[dict]) -> pd.DataFrame:
     rows = []
     for index, paper in enumerate(papers):
@@ -376,7 +736,13 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
                 "selected": bool(paper.get("selected")),
                 "rank": index + 1,
                 "score": paper.get("score", 0),
+                "section": paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", "")),
                 "category": paper.get("category", "Research Article"),
+                "evidence_need": paper.get("evidence_need", ""),
+                "source_type_needed": paper.get("source_type_needed", paper.get("category", "Research Article")),
+                "citation_policy": paper.get("citation_policy", citation_policy_for_category(paper.get("category", "Research Article"))),
+                "writing_use": paper.get("writing_use", ""),
+                "what_to_extract": paper.get("what_to_extract", ""),
                 "citation": citation_key(paper),
                 "year": paper.get("year"),
                 "citations": paper.get("citation_count", 0),
@@ -385,6 +751,7 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
                 "source": paper.get("source", ""),
                 "title": paper.get("title", ""),
                 "reason": paper.get("score_reason", ""),
+                "found_query": paper.get("found_query") or paper.get("query", ""),
                 "paper_id": paper.get("paper_id", ""),
             }
         )
@@ -394,7 +761,13 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
 PAPER_TABLE_DISABLED_COLUMNS = [
     "rank",
     "score",
+    "section",
     "category",
+    "evidence_need",
+    "source_type_needed",
+    "citation_policy",
+    "writing_use",
+    "what_to_extract",
     "citation",
     "year",
     "citations",
@@ -403,6 +776,7 @@ PAPER_TABLE_DISABLED_COLUMNS = [
     "source",
     "title",
     "reason",
+    "found_query",
     "paper_id",
 ]
 
@@ -851,16 +1225,20 @@ with tabs[2]:
 
             claude_plan = analysis_state.get("claude_discussion_search_plan") or {}
             if claude_plan:
-                with st.expander("Claude discussion evidence plan", expanded=True):
+                with st.expander("Claude section-wise evidence plan", expanded=True):
                     provider = claude_plan.get("query_provider") or "Claude"
                     model_used = claude_plan.get("model_used") or st.session_state.claude_model
                     st.caption(
-                        f"{provider} planned what paper types are needed for the Discussion, then the same search engines used those queries."
+                        f"{provider} planned what paper types are needed for Introduction, Methodology, and Discussion, then the same search engines use those queries."
                     )
                     if model_used:
                         st.caption(f"Model: {model_used}")
                     if claude_plan.get("claude_query_error"):
                         st.warning(f"Claude query planning warning: {claude_plan.get('claude_query_error')}")
+                    section_plan = section_plan_items_from_analysis(analysis_state, st.session_state.get("queries"))
+                    if section_plan:
+                        st.write("Section-wise evidence baskets")
+                        st.dataframe(evidence_plan_rows(section_plan), width="stretch", hide_index=True)
                     needed_types = claude_plan.get("needed_paper_types") or []
                     if needed_types:
                         st.write("Needed paper types")
@@ -894,7 +1272,7 @@ with tabs[2]:
             if st.button("Search papers using these planned queries", type="primary", width="stretch"):
                 analysis = st.session_state.get("analysis") or {}
                 context_text = current_context_text(inputs, extracted_files, analysis)
-                with st.spinner("Searching, deduplicating, and scoring papers from the planned Discussion queries..."):
+                with st.spinner("Searching, deduplicating, scoring, and tagging papers by manuscript section..."):
                     search_result = search_and_rank_papers(
                         queries=st.session_state.queries,
                         context_text=context_text,
@@ -909,6 +1287,11 @@ with tabs[2]:
                         per_query_limit=st.session_state.per_query_limit,
                         use_ai_scoring=st.session_state.use_ai_scoring,
                     )
+                search_result = annotate_search_result_with_evidence_plan(
+                    search_result,
+                    analysis,
+                    st.session_state.get("queries", []),
+                )
                 st.session_state.paper_search = search_result
                 st.session_state.selected_papers = search_result.get("selected", [])
                 st.session_state.downloaded_references = []
@@ -954,11 +1337,15 @@ with tabs[2]:
         if papers:
             df = paper_rows(papers)
             category_counts = df["category"].value_counts().to_dict() if "category" in df else {}
-            count_cols = st.columns(3)
+            section_counts = df["section"].value_counts().to_dict() if "section" in df else {}
+            count_cols = st.columns(6)
             count_cols[0].metric("Research articles found", category_counts.get("Research Article", 0))
             count_cols[1].metric("Review papers found", category_counts.get("Review Paper", 0))
             count_cols[2].metric("Theses found", category_counts.get("Thesis", 0))
-            st.info("Go to Reference Selection & Reading to choose sources separately by type.")
+            count_cols[3].metric("Introduction", section_counts.get("Introduction", 0))
+            count_cols[4].metric("Methodology", section_counts.get("Methodology", 0))
+            count_cols[5].metric("Discussion", section_counts.get("Discussion", 0))
+            st.info("Go to Reference Selection & Reading to choose sources section-wise, then by research paper, review paper, and thesis.")
 
     with selection_tab:
         st.markdown("### Reference Selection and Reading")
@@ -967,39 +1354,92 @@ with tabs[2]:
         if not papers:
             st.info("Run Reference Finding first. Search results will appear here for separate selection.")
         else:
+            analysis = st.session_state.get("analysis") or {}
+            search_result = annotate_search_result_with_evidence_plan(
+                search_result,
+                analysis,
+                st.session_state.get("queries", []),
+            )
+            papers = search_result.get("papers", [])
+            st.session_state.paper_search = search_result
             df = paper_rows(papers)
             category_counts = df["category"].value_counts().to_dict() if "category" in df else {}
-            count_cols = st.columns(3)
+            section_counts = df["section"].value_counts().to_dict() if "section" in df else {}
+            count_cols = st.columns(6)
             count_cols[0].metric("Research articles", category_counts.get("Research Article", 0))
             count_cols[1].metric("Review papers", category_counts.get("Review Paper", 0))
             count_cols[2].metric("Theses", category_counts.get("Thesis", 0))
+            count_cols[3].metric("Introduction", section_counts.get("Introduction", 0))
+            count_cols[4].metric("Methodology", section_counts.get("Methodology", 0))
+            count_cols[5].metric("Discussion", section_counts.get("Discussion", 0))
             st.caption(
-                "Select sources separately by type. The app will merge the chosen research papers, review papers, and theses for downloading, Gemini reading, and drafting."
+                "Select references by manuscript section first. Each section contains separate research-paper, review-paper, and thesis/RoL-mining baskets."
             )
-            category_sections = [
-                ("Research papers", "Research Article", "research_articles"),
-                ("Review papers", "Review Paper", "review_papers"),
-                ("Theses / dissertations", "Thesis", "theses"),
-            ]
-            known_categories = {category for _label, category, _key in category_sections}
+            plan_items = search_result.get("section_evidence_plan") or section_plan_items_from_analysis(
+                analysis,
+                st.session_state.get("queries", []),
+            )
+            if plan_items:
+                with st.expander("Full evidence-selection plan", expanded=False):
+                    st.dataframe(evidence_plan_rows(plan_items), width="stretch", hide_index=True)
+
+            known_categories = {category for _label, category, _key in SOURCE_TYPE_SECTIONS}
             other_papers = [paper for paper in papers if paper.get("category", "Research Article") not in known_categories]
+            source_sections = list(SOURCE_TYPE_SECTIONS)
             if other_papers:
-                category_sections.append(("Other sources", "__OTHER__", "other_sources"))
+                source_sections.append(("Other sources", "__OTHER__", "other_sources"))
 
             edited_frames = []
-            selection_tabs = st.tabs([label for label, _category, _key in category_sections])
-            for tab, (label, category, key_suffix) in zip(selection_tabs, category_sections):
-                with tab:
-                    if category == "__OTHER__":
-                        category_papers = other_papers
+            sections_present = sorted(
+                {paper.get("evidence_section") or "Discussion" for paper in papers} | {item.get("section", "Discussion") for item in plan_items},
+                key=section_sort_key,
+            )
+            if "Other" in sections_present and not other_papers:
+                sections_present = [section for section in sections_present if section != "Other"]
+            section_tabs = st.tabs(sections_present)
+            for section_tab, section in zip(section_tabs, sections_present):
+                with section_tab:
+                    section_plan = evidence_plan_rows(plan_items, section=section)
+                    if not section_plan.empty:
+                        with st.expander(f"{section} reference plan", expanded=True):
+                            st.dataframe(section_plan, width="stretch", hide_index=True)
                     else:
-                        category_papers = [paper for paper in papers if paper.get("category", "Research Article") == category]
-                    selected_in_category = len([paper for paper in category_papers if paper.get("selected")])
-                    st.caption(f"{len(category_papers)} found; {selected_in_category} currently selected.")
-                    if category_papers:
-                        edited_frames.append(paper_selection_editor(category_papers, f"evidence_select_{key_suffix}"))
-                    else:
-                        st.info(f"No {label.lower()} found yet.")
+                        st.info(f"No explicit {section.lower()} plan was returned; papers are grouped here by query keywords.")
+
+                    section_papers = [
+                        paper
+                        for paper in papers
+                        if (paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", ""))) == section
+                    ]
+                    source_tabs = st.tabs([label for label, _category, _key in source_sections])
+                    for source_tab, (label, category, key_suffix) in zip(source_tabs, source_sections):
+                        with source_tab:
+                            if category == "__OTHER__":
+                                category_papers = [
+                                    paper
+                                    for paper in section_papers
+                                    if paper.get("category", "Research Article") not in known_categories
+                                ]
+                            else:
+                                category_papers = [
+                                    paper
+                                    for paper in section_papers
+                                    if paper.get("category", "Research Article") == category
+                                ]
+                            selected_in_category = len([paper for paper in category_papers if paper.get("selected")])
+                            st.caption(f"{len(category_papers)} found; {selected_in_category} currently selected.")
+                            if category_papers:
+                                section_key = normalize_match_text(section).replace(" ", "_") or "section"
+                                st.write(f"Selection purpose: {fallback_evidence_need(section, category)}")
+                                st.write(f"Citation policy: {citation_policy_for_category(category)}")
+                                edited_frames.append(
+                                    paper_selection_editor(
+                                        category_papers,
+                                        f"evidence_select_{section_key}_{key_suffix}",
+                                    )
+                                )
+                            else:
+                                st.info(f"No {label.lower()} found for {section.lower()} yet.")
 
             if st.button("Save selected sources from all sections", width="stretch"):
                 selected_ids = set()
@@ -1017,11 +1457,34 @@ with tabs[2]:
                 ]
                 selected_summary = pd.DataFrame(
                     [
-                        {"category": category, "selected": len([p for p in selected if p.get("category") == category])}
-                        for category in ["Research Article", "Review Paper", "Thesis"]
+                        {
+                            "section": section,
+                            "research_papers": len(
+                                [
+                                    p
+                                    for p in selected
+                                    if p.get("evidence_section") == section and p.get("category") == "Research Article"
+                                ]
+                            ),
+                            "review_papers": len(
+                                [
+                                    p
+                                    for p in selected
+                                    if p.get("evidence_section") == section and p.get("category") == "Review Paper"
+                                ]
+                            ),
+                            "theses": len(
+                                [
+                                    p
+                                    for p in selected
+                                    if p.get("evidence_section") == section and p.get("category") == "Thesis"
+                                ]
+                            ),
+                        }
+                        for section in EVIDENCE_SECTION_ORDER
                     ]
                 )
-                st.success(f"Saved {len(selected)} selected source(s) from separate evidence sections.")
+                st.success(f"Saved {len(selected)} selected source(s) from section-wise evidence baskets.")
                 st.dataframe(selected_summary, width="stretch", hide_index=True)
 
             selected_papers = st.session_state.get("selected_papers", [])
@@ -1210,10 +1673,20 @@ with tabs[3]:
                                 per_query_limit=st.session_state.per_query_limit,
                                 use_ai_scoring=st.session_state.use_ai_scoring,
                             )
+                        extra_search = annotate_search_result_with_evidence_plan(
+                            extra_search,
+                            st.session_state.get("analysis") or {},
+                            review_queries,
+                        )
                         st.session_state.paper_search = merge_search_results(
                             st.session_state.get("paper_search") or {},
                             extra_search,
                             st.session_state.reference_count,
+                        )
+                        st.session_state.paper_search = annotate_search_result_with_evidence_plan(
+                            st.session_state.paper_search,
+                            st.session_state.get("analysis") or {},
+                            st.session_state.get("queries", []),
                         )
                         st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
                         selected_ids = {str(item.get("paper_id")) for item in st.session_state.selected_papers}
@@ -1261,10 +1734,20 @@ with tabs[3]:
                                 per_query_limit=st.session_state.per_query_limit,
                                 use_ai_scoring=st.session_state.use_ai_scoring,
                             )
+                        extra_search = annotate_search_result_with_evidence_plan(
+                            extra_search,
+                            st.session_state.get("analysis") or {},
+                            rol_queries,
+                        )
                         st.session_state.paper_search = merge_search_results(
                             st.session_state.get("paper_search") or {},
                             extra_search,
                             st.session_state.reference_count,
+                        )
+                        st.session_state.paper_search = annotate_search_result_with_evidence_plan(
+                            st.session_state.paper_search,
+                            st.session_state.get("analysis") or {},
+                            st.session_state.get("queries", []),
                         )
                         st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
                         selected_ids = {str(item.get("paper_id")) for item in st.session_state.selected_papers}
@@ -1345,10 +1828,20 @@ with tabs[3]:
                             per_query_limit=st.session_state.per_query_limit,
                             use_ai_scoring=st.session_state.use_ai_scoring,
                         )
+                    extra_search = annotate_search_result_with_evidence_plan(
+                        extra_search,
+                        st.session_state.get("analysis") or {},
+                        search_queries,
+                    )
                     st.session_state.paper_search = merge_search_results(
                         st.session_state.get("paper_search") or {},
                         extra_search,
                         st.session_state.reference_count,
+                    )
+                    st.session_state.paper_search = annotate_search_result_with_evidence_plan(
+                        st.session_state.paper_search,
+                        st.session_state.get("analysis") or {},
+                        st.session_state.get("queries", []),
                     )
                     st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
                     selected_ids = {str(item.get("paper_id")) for item in st.session_state.selected_papers}
