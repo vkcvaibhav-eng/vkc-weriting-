@@ -1008,6 +1008,8 @@ with tabs[2]:
                     {
                         "status": "downloaded" if item.get("download_success") else "not found",
                         "method": item.get("download_method", ""),
+                        "text_status": item.get("text_status", ""),
+                        "text_engine": item.get("text_extraction_method", ""),
                         "chars": item.get("full_text_chars", 0),
                         "size_mb": round((item.get("pdf_size_bytes", 0) or 0) / 1024 / 1024, 2),
                         "category": item.get("category", ""),

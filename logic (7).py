@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -18,6 +18,16 @@ import urllib3
 import httpx
 from openai import OpenAI
 from pypdf import PdfReader
+
+try:
+    import fitz  # PyMuPDF
+except Exception:  # pragma: no cover - optional PDF extraction upgrade
+    fitz = None
+
+try:
+    import pdfplumber
+except Exception:  # pragma: no cover - optional PDF extraction upgrade
+    pdfplumber = None
 
 try:
     from docx import Document
@@ -30,6 +40,13 @@ except Exception:  # pragma: no cover - import error is shown in the Streamlit U
     Pt = None
 
 
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)).strip())
+    except Exception:
+        return default
+
+
 APP_ROOT = Path(__file__).resolve().parent
 STYLE_LIBRARY_DIR = APP_ROOT / "style_library"
 AUTHOR_STYLE_DIR = APP_ROOT / "styles"
@@ -38,6 +55,9 @@ SAU_ICAR_REFERENCE_STYLE_GUIDE_PATH = APP_ROOT / "reference_style_guide.md"
 OUTPUT_DIR = APP_ROOT / "outputs"
 DOWNLOADED_REFERENCES_DIR = APP_ROOT / "downloaded_references"
 SSL_VERIFY = os.getenv("RP_APP_VERIFY_SSL", "false").strip().lower() in {"1", "true", "yes", "on"}
+MIN_USEFUL_PDF_TEXT_CHARS = 1200
+GEMINI_PDF_IMAGE_MAX_PAGES = env_int("RP_APP_GEMINI_PDF_IMAGE_MAX_PAGES", 42)
+GEMINI_PDF_IMAGE_BATCH_SIZE = env_int("RP_APP_GEMINI_PDF_IMAGE_BATCH_SIZE", 4)
 MIN_RESEARCH_ARTICLES = 10
 MIN_THESES = 3
 MIN_REVIEW_PAPERS = 1
@@ -380,6 +400,69 @@ def extract_text_from_pdf(source: str | Path | io.BytesIO) -> str:
         except Exception:
             continue
     return "\n".join(parts).strip()
+
+
+def extract_text_with_pymupdf(pdf_bytes: bytes, max_pages: int | None = None) -> str:
+    if not pdf_bytes or fitz is None:
+        return ""
+    parts: list[str] = []
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+            page_count = len(document)
+            limit = min(page_count, max_pages or page_count)
+            for page_index in range(limit):
+                page = document.load_page(page_index)
+                text = page.get_text("text") or ""
+                if not text.strip():
+                    blocks = page.get_text("blocks") or []
+                    text = "\n".join(str(block[4]) for block in blocks if len(block) > 4 and str(block[4]).strip())
+                if text.strip():
+                    parts.append(text)
+    except Exception:
+        return ""
+    return "\n".join(parts).strip()
+
+
+def extract_text_with_pdfplumber(pdf_bytes: bytes, max_pages: int | None = None) -> str:
+    if not pdf_bytes or pdfplumber is None:
+        return ""
+    parts: list[str] = []
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            pages = pdf.pages[: max_pages or len(pdf.pages)]
+            for page in pages:
+                try:
+                    text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+                except Exception:
+                    text = ""
+                if text.strip():
+                    parts.append(text)
+    except Exception:
+        return ""
+    return "\n".join(parts).strip()
+
+
+def extract_pdf_text_detail_from_bytes(pdf_bytes: bytes) -> tuple[str, str]:
+    candidates: list[tuple[str, str]] = []
+    if not pdf_bytes:
+        return "", ""
+    try:
+        text = extract_text_from_pdf(io.BytesIO(pdf_bytes))
+        candidates.append((text, "pypdf"))
+    except Exception:
+        pass
+    pymupdf_text = extract_text_with_pymupdf(pdf_bytes)
+    if pymupdf_text:
+        candidates.append((pymupdf_text, "PyMuPDF"))
+    pdfplumber_text = extract_text_with_pdfplumber(pdf_bytes)
+    if pdfplumber_text:
+        candidates.append((pdfplumber_text, "pdfplumber"))
+    if not candidates:
+        return "", "no_extractable_text"
+    best_text, best_method = max(candidates, key=lambda item: len(item[0] or ""))
+    if len(best_text) < MIN_USEFUL_PDF_TEXT_CHARS:
+        best_method = f"{best_method}_low_text"
+    return best_text.strip(), best_method
 
 
 def extract_docx(source: str | Path | io.BytesIO) -> tuple[str, list[dict[str, Any]]]:
@@ -2254,15 +2337,192 @@ def scrape_pdf_links_from_page(url: str, limit: int = 5) -> list[str]:
         response = requests.get(url, headers=pdf_request_headers(), timeout=20, verify=SSL_VERIFY)
         if response.status_code != 200:
             return []
-        matches = re.findall(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', response.text, flags=re.IGNORECASE)
+        matches = re.findall(r'href=["\']([^"\']+)["\']', response.text, flags=re.IGNORECASE)
         links = []
         for match in matches:
             full_url = urljoin(url, match)
-            if full_url not in links:
+            lower = full_url.lower()
+            if (
+                ".pdf" in lower
+                or "/bitstream/" in lower
+                or "/retrieve/" in lower
+                or "/server/api/core/bitstreams/" in lower
+                or "isallowed=y" in lower
+            ) and full_url not in links:
                 links.append(full_url)
         return links[:limit]
     except Exception:
         return []
+
+
+def fetch_html(url: str, timeout: int = 25) -> str:
+    if not url:
+        return ""
+    try:
+        response = requests.get(url, headers=pdf_request_headers(), timeout=timeout, verify=SSL_VERIFY)
+        content_type = response.headers.get("Content-Type", "")
+        if response.status_code == 200 and "html" in content_type.lower():
+            return response.text
+        if response.status_code == 200 and response.text and "<html" in response.text.lower():
+            return response.text
+    except Exception:
+        return ""
+    return ""
+
+
+def ordered_unique_urls(urls: list[str]) -> list[str]:
+    seen = set()
+    unique = []
+    for url in urls:
+        clean = str(url or "").strip()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        unique.append(clean)
+    return unique
+
+
+def krishikosh_handle_from_url(link: str) -> str:
+    if "/handle/" not in link:
+        return ""
+    handle = unquote(link.split("/handle/", 1)[-1]).split("?", 1)[0].split("#", 1)[0].strip("/")
+    return handle
+
+
+def krishikosh_bitstream_candidates(link: str, html: str = "") -> list[str]:
+    candidates: list[str] = []
+    if link:
+        candidates.append(link)
+    if html:
+        for match in re.findall(r'(?:href|src)=["\']([^"\']+)["\']', html, flags=re.IGNORECASE):
+            full_url = urljoin(link, match)
+            lower = full_url.lower()
+            if (
+                "/bitstream/" in lower
+                or "/retrieve/" in lower
+                or "/server/api/core/bitstreams/" in lower
+                or ".pdf" in lower
+                or "download" in lower
+            ):
+                candidates.append(full_url)
+        for match in re.findall(r'https?://[^\s"\'<>]+', html, flags=re.IGNORECASE):
+            lower = match.lower()
+            if "/bitstream/" in lower or "/retrieve/" in lower or ".pdf" in lower:
+                candidates.append(match.rstrip(").,;"))
+    handle_id = krishikosh_handle_from_url(link)
+    if handle_id:
+        quoted_handle = quote(handle_id, safe="/")
+        filenames = [
+            "thesis.pdf",
+            "Thesis.pdf",
+            "fulltext.pdf",
+            "Fulltext.pdf",
+            "dissertation.pdf",
+            "Dissertation.pdf",
+            "1.pdf",
+            "01.pdf",
+        ]
+        for filename in filenames:
+            candidates.extend(
+                [
+                    f"https://krishikosh.egranth.ac.in/bitstream/handle/{quoted_handle}/{filename}?sequence=1&isAllowed=y",
+                    f"https://krishikosh.egranth.ac.in/bitstream/{quoted_handle}/1/{filename}",
+                    f"https://krishikosh.egranth.ac.in/bitstream/{quoted_handle}/2/{filename}",
+                ]
+            )
+        for sequence in range(1, 8):
+            candidates.extend(
+                [
+                    f"https://krishikosh.egranth.ac.in/bitstream/handle/{quoted_handle}/{sequence}.pdf?sequence={sequence}&isAllowed=y",
+                    f"https://krishikosh.egranth.ac.in/bitstream/{quoted_handle}/{sequence}/thesis.pdf",
+                ]
+            )
+    return ordered_unique_urls(candidates)
+
+
+def dspace_api_bitstream_candidates(link: str, html: str = "") -> list[str]:
+    candidates: list[str] = []
+    if not link:
+        return candidates
+    parsed = urlparse(link)
+    base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    if not base:
+        return candidates
+    uuid_matches = set(re.findall(r"/items/([0-9a-fA-F-]{32,36})", link))
+    if html:
+        uuid_matches.update(re.findall(r"/items/([0-9a-fA-F-]{32,36})", html))
+        uuid_matches.update(re.findall(r'"uuid"\s*:\s*"([0-9a-fA-F-]{32,36})"', html))
+    headers = pdf_request_headers()
+    for item_uuid in uuid_matches:
+        try:
+            bundles_url = f"{base}/server/api/core/items/{item_uuid}/bundles"
+            bundles_response = requests.get(bundles_url, headers=headers, timeout=25, verify=SSL_VERIFY)
+            if bundles_response.status_code != 200:
+                continue
+            bundles_data = bundles_response.json()
+            bundles = ((bundles_data.get("_embedded") or {}).get("bundles") or [])
+            for bundle in bundles:
+                bitstreams_url = ((bundle.get("_links") or {}).get("bitstreams") or {}).get("href")
+                if not bitstreams_url:
+                    self_url = ((bundle.get("_links") or {}).get("self") or {}).get("href")
+                    bitstreams_url = f"{self_url}/bitstreams" if self_url else ""
+                if not bitstreams_url:
+                    continue
+                bitstreams_response = requests.get(bitstreams_url, headers=headers, timeout=25, verify=SSL_VERIFY)
+                if bitstreams_response.status_code != 200:
+                    continue
+                bitstreams_data = bitstreams_response.json()
+                bitstreams = ((bitstreams_data.get("_embedded") or {}).get("bitstreams") or [])
+                for bitstream in bitstreams:
+                    content_url = ((bitstream.get("_links") or {}).get("content") or {}).get("href")
+                    name = str(bitstream.get("name") or "").lower()
+                    bundle_name = str(bundle.get("name") or "").lower()
+                    if content_url and (".pdf" in name or "original" in bundle_name or "thesis" in name):
+                        candidates.append(content_url)
+        except Exception:
+            continue
+    return ordered_unique_urls(candidates)
+
+
+def krishikosh_api_candidates_from_metadata(paper: dict[str, Any], limit: int = 4) -> list[str]:
+    title = str(paper.get("title") or "").strip()
+    abstract = str(paper.get("abstract") or "").strip()
+    query = title or " ".join((abstract.split()[:12] if abstract else []))
+    if not query:
+        return []
+    candidates: list[str] = []
+    try:
+        response = requests.get(
+            "https://krishikosh.egranth.ac.in/server/api/discover/search/objects",
+            params={"query": query, "size": limit},
+            headers=pdf_request_headers(),
+            timeout=35,
+            verify=SSL_VERIFY,
+        )
+        if response.status_code != 200:
+            return []
+        data = response.json()
+        objects = ((((data.get("_embedded") or {}).get("searchResult") or {}).get("_embedded") or {}).get("objects") or [])
+        for obj in objects:
+            item = ((obj.get("_embedded") or {}).get("indexableObject") or {})
+            item_link = ((obj.get("_links") or {}).get("indexableObject") or {}).get("href")
+            uuid = item.get("uuid") or item.get("id")
+            handle = item.get("handle")
+            if item_link:
+                candidates.extend(dspace_api_bitstream_candidates(item_link))
+            if uuid:
+                candidates.extend(
+                    dspace_api_bitstream_candidates(
+                        f"https://krishikosh.egranth.ac.in/server/api/core/items/{uuid}"
+                    )
+                )
+            if handle:
+                handle_url = f"https://krishikosh.egranth.ac.in/handle/{handle}"
+                candidates.append(handle_url)
+                candidates.extend(krishikosh_bitstream_candidates(handle_url))
+    except Exception:
+        return ordered_unique_urls(candidates)
+    return ordered_unique_urls(candidates)
 
 
 def extract_doi_from_paper(paper: dict[str, Any]) -> str:
@@ -2333,28 +2593,35 @@ def strategy_researchgate_pdf(paper: dict[str, Any]) -> tuple[bytes | None, str]
 
 def strategy_krishikosh_pdf(paper: dict[str, Any]) -> tuple[bytes | None, str]:
     link = str(paper.get("url") or "")
+    pdf_url = str(paper.get("pdf_url") or "")
     category = str(paper.get("category") or "")
-    if "krishikosh" not in link.lower() and "thesis" not in category.lower():
+    title = str(paper.get("title") or "")
+    source = str(paper.get("source") or "")
+    is_thesis_like = any(
+        token in f"{link} {pdf_url} {category} {title} {source}".lower()
+        for token in ["krishikosh", "shodhganga", "thesis", "dissertation", "agricultural university"]
+    )
+    if not is_thesis_like:
         return None, ""
     try:
-        if link.lower().endswith(".pdf"):
-            pdf = download_pdf_url(link)
+        html = fetch_html(link) if link and not link.lower().endswith(".pdf") else ""
+        candidates = ordered_unique_urls(
+            [pdf_url, link]
+            + scrape_pdf_links_from_page(link, limit=20)
+            + krishikosh_bitstream_candidates(link, html)
+            + dspace_api_bitstream_candidates(link, html)
+            + krishikosh_api_candidates_from_metadata(paper)
+        )
+        for candidate in candidates:
+            pdf = download_pdf_url(candidate, timeout=45)
             if pdf:
-                return pdf, "KrishiKosh direct PDF"
-        response = requests.get(link, headers=pdf_request_headers(), timeout=20, verify=SSL_VERIFY)
-        matches = re.findall(r'href=["\']([^"\']*/bitstream/[^"\']+\.pdf[^"\']*)["\']', response.text, flags=re.IGNORECASE)
-        for match in matches:
-            full_url = urljoin(link, match)
-            pdf = download_pdf_url(full_url)
-            if pdf:
-                return pdf, "KrishiKosh bitstream"
-        if "/handle/" in link:
-            handle_id = link.split("/handle/")[-1].strip("/")
-            for index in range(1, 5):
-                guess_url = f"https://krishikosh.egranth.ac.in/bitstream/1/{handle_id}/{index}/thesis.pdf"
-                pdf = download_pdf_url(guess_url)
-                if pdf:
-                    return pdf, "KrishiKosh guessed bitstream"
+                paper["pdf_url"] = candidate
+                method = "KrishiKosh/agri repository open PDF"
+                if "/bitstream/" in candidate.lower():
+                    method = "KrishiKosh bitstream/open thesis PDF"
+                elif candidate != link:
+                    method = "Thesis repository candidate PDF"
+                return pdf, method
     except Exception:
         return None, ""
     return None, ""
@@ -2446,12 +2713,8 @@ def strategy_unpaywall_pdf(paper: dict[str, Any]) -> tuple[bytes | None, str]:
 
 
 def extract_pdf_text_from_bytes(pdf_bytes: bytes) -> str:
-    if not pdf_bytes:
-        return ""
-    try:
-        return extract_text_from_pdf(io.BytesIO(pdf_bytes))
-    except Exception:
-        return ""
+    text, _method = extract_pdf_text_detail_from_bytes(pdf_bytes)
+    return text
 
 
 def save_reference_pdf(paper: dict[str, Any], pdf_bytes: bytes) -> Path:
@@ -2494,11 +2757,14 @@ def download_and_read_selected_papers(
 
         if pdf_bytes:
             pdf_path = save_reference_pdf(enriched, pdf_bytes)
-            full_text = extract_pdf_text_from_bytes(pdf_bytes)
+            full_text, extraction_method = extract_pdf_text_detail_from_bytes(pdf_bytes)
+            text_status = "readable_text" if len(full_text) >= MIN_USEFUL_PDF_TEXT_CHARS else "downloaded_scan_or_low_text"
             enriched.update(
                 {
                     "download_success": True,
                     "download_method": method,
+                    "text_extraction_method": extraction_method,
+                    "text_status": text_status,
                     "pdf_path": str(pdf_path),
                     "pdf_size_bytes": len(pdf_bytes),
                     "full_text": full_text,
@@ -2510,6 +2776,8 @@ def download_and_read_selected_papers(
                 {
                     "download_success": False,
                     "download_method": "",
+                    "text_extraction_method": "",
+                    "text_status": "pdf_not_downloaded",
                     "pdf_path": "",
                     "pdf_size_bytes": 0,
                     "full_text": "",
@@ -2671,6 +2939,124 @@ def gemini_generate_text(api_key: str, model: str, prompt: str, temperature: flo
     return "\n".join(str(part.get("text") or "") for part in parts).strip()
 
 
+def gemini_generate_parts(
+    api_key: str,
+    model: str,
+    parts: list[dict[str, Any]],
+    temperature: float = 0.1,
+    timeout: int = 180,
+) -> str:
+    if not api_key or not parts:
+        return ""
+    response = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model or DEFAULT_GEMINI_MODEL}:generateContent",
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        json={
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"temperature": temperature},
+        },
+        timeout=timeout,
+        verify=SSL_VERIFY,
+    )
+    response.raise_for_status()
+    data = response.json()
+    response_parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+    return "\n".join(str(part.get("text") or "") for part in response_parts).strip()
+
+
+def selected_pdf_page_indices_for_image_reading(page_count: int, category: str = "") -> list[int]:
+    if page_count <= 0:
+        return []
+    max_pages = max(1, GEMINI_PDF_IMAGE_MAX_PAGES)
+    category_lower = category.lower()
+    if "thesis" in category_lower or "dissertation" in category_lower:
+        trailing = min(8, max_pages // 4, page_count)
+        leading = max_pages - trailing
+        indices = list(range(min(page_count, leading)))
+        if trailing:
+            indices.extend(range(max(0, page_count - trailing), page_count))
+    elif "review" in category_lower:
+        leading = max(1, max_pages - min(6, max_pages // 3))
+        indices = list(range(min(page_count, leading)))
+        indices.extend(range(max(0, page_count - min(6, max_pages - len(indices))), page_count))
+    else:
+        indices = list(range(min(page_count, max_pages)))
+    return list(dict.fromkeys(index for index in indices if 0 <= index < page_count))[:max_pages]
+
+
+def render_pdf_pages_as_inline_images(pdf_path: str | Path, page_indices: list[int]) -> list[tuple[int, str]]:
+    if fitz is None or not page_indices:
+        return []
+    images: list[tuple[int, str]] = []
+    try:
+        with fitz.open(str(pdf_path)) as document:
+            matrix = fitz.Matrix(1.35, 1.35)
+            for page_index in page_indices:
+                if page_index >= len(document):
+                    continue
+                page = document.load_page(page_index)
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                image_bytes = pixmap.tobytes("png")
+                images.append((page_index + 1, base64.b64encode(image_bytes).decode("ascii")))
+    except Exception:
+        return []
+    return images
+
+
+def gemini_mine_pdf_images_for_source_text(
+    pdf_path: str | Path,
+    api_key: str,
+    model: str,
+    category: str,
+    context_text: str = "",
+) -> str:
+    if not api_key or fitz is None or not pdf_path or not Path(pdf_path).exists():
+        return ""
+    try:
+        with fitz.open(str(pdf_path)) as document:
+            page_indices = selected_pdf_page_indices_for_image_reading(len(document), category)
+    except Exception:
+        return ""
+    rendered_pages = render_pdf_pages_as_inline_images(pdf_path, page_indices)
+    if not rendered_pages:
+        return ""
+
+    batch_size = max(1, min(6, GEMINI_PDF_IMAGE_BATCH_SIZE))
+    mined_parts: list[str] = []
+    for start in range(0, len(rendered_pages), batch_size):
+        batch = rendered_pages[start : start + batch_size]
+        page_numbers = ", ".join(str(page_number) for page_number, _image in batch)
+        prompt = f"""
+You are reading page images from a downloaded scholarly PDF because normal PDF text extraction returned little or no text.
+Use only visible text in these page images. Do not invent authors, years, titles, findings, or references.
+
+Source category: {category}
+Current research context:
+{truncate_text(context_text, 2500)}
+
+Pages in this batch: {page_numbers}
+
+Task:
+- If these pages contain Review of Literature, Literature Review, Chapter II, references, bibliography, or literature cited,
+  extract author-year study leads, original paper titles if visible, crop/pest/context, methods/treatments, key findings,
+  and bibliography entries that can be searched again.
+- If these pages are front matter, introduction, methods, or irrelevant pages, extract only useful citation/source-mining clues.
+- Clearly include page numbers with each extracted clue.
+- Keep output concise but information-rich.
+"""
+        parts: list[dict[str, Any]] = [{"text": prompt}]
+        for page_number, image_b64 in batch:
+            parts.append({"text": f"Page {page_number} image:"})
+            parts.append({"inline_data": {"mime_type": "image/png", "data": image_b64}})
+        try:
+            mined = gemini_generate_parts(api_key, model, parts, temperature=0.05, timeout=240)
+        except Exception as exc:
+            mined = f"Gemini PDF image reading failed for pages {page_numbers}: {exc}"
+        if mined.strip():
+            mined_parts.append(f"PDF image pages {page_numbers}:\n{mined.strip()}")
+    return truncate_text("\n\n".join(mined_parts), 50000)
+
+
 def extract_section_between_markers(text: str, start_markers: list[str], end_markers: list[str], limit: int = 14000) -> str:
     if not text:
         return ""
@@ -2755,9 +3141,6 @@ def gemini_read_reference(
     full_text = enriched.get("full_text") or ""
     abstract = enriched.get("abstract") or ""
     evidence_source = "downloaded_full_text" if full_text else "abstract_and_metadata_only"
-    literature_review = extract_literature_review_section(full_text) if category == "Thesis" else ""
-    references_section = extract_references_section(full_text) if category in {"Thesis", "Review Paper"} else ""
-    readable_text = full_text or abstract
     fallback = fallback_gemini_note(enriched, evidence_source, status="fallback")
     style_profile = style_profile or {}
 
@@ -2765,6 +3148,35 @@ def gemini_read_reference(
         enriched["gemini_note"] = fallback
         enriched["gemini_read_status"] = "missing Gemini API key"
         return enriched
+
+    pdf_path = str(enriched.get("pdf_path") or "")
+    low_text_pdf = (
+        bool(pdf_path)
+        and Path(pdf_path).exists()
+        and len(full_text) < MIN_USEFUL_PDF_TEXT_CHARS
+        and category in {"Thesis", "Review Paper"}
+    )
+    if low_text_pdf:
+        image_mined_text = gemini_mine_pdf_images_for_source_text(
+            pdf_path,
+            api_key,
+            model,
+            category,
+            context_text,
+        )
+        if image_mined_text:
+            full_text = f"{full_text}\n\nGemini PDF image reading notes:\n{image_mined_text}".strip()
+            evidence_source = "downloaded_pdf_gemini_image_reading"
+            enriched["full_text"] = full_text
+            enriched["full_text_chars"] = len(full_text)
+            enriched["text_status"] = "gemini_pdf_image_read"
+            enriched["text_extraction_method"] = (
+                f"{enriched.get('text_extraction_method', 'low_text')} + Gemini PDF image reading"
+            )
+
+    literature_review = extract_literature_review_section(full_text) if category == "Thesis" else ""
+    references_section = extract_references_section(full_text) if category in {"Thesis", "Review Paper"} else ""
+    readable_text = full_text or abstract
 
     prompt = f"""
 You are reading one scholarly source for a research-paper writing app.
