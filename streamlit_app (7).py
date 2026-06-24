@@ -1256,7 +1256,7 @@ with tabs[2]:
                             st.write(item)
 
         if st.session_state.get("queries"):
-            with st.expander("Search queries from Results and Discussion plan", expanded=True):
+            with st.expander("Search queries from Results and section-wise evidence plan", expanded=True):
                 for query in st.session_state.queries:
                     st.code(query, language="text")
         else:

@@ -1329,9 +1329,10 @@ def generate_claude_discussion_search_plan(
         return fallback
 
     prompt = f"""
-You are planning the literature search for the Discussion section of a research paper.
-The Results have priority. The search should find evidence needed to justify, explain,
-compare, contrast, and contextualize the actual findings.
+You are planning the section-wise evidence search for a research paper.
+The Results have priority for Discussion, but Introduction and Methodology need their
+own targeted references. The search should find evidence needed to frame, justify,
+explain, compare, contrast, and contextualize the manuscript.
 
 Research analysis:
 {json.dumps(analysis or {}, ensure_ascii=True)[:22000]}
@@ -1382,7 +1383,7 @@ missing_evidence_questions: array of brief questions the app should answer throu
         text = claude_text(
             claude_key,
             claude_model,
-            "You are a premium scientific Discussion evidence planner.",
+            "You are a premium scientific manuscript evidence planner.",
             prompt,
             temperature=0.1,
             max_tokens=5000,
