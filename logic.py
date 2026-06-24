@@ -296,6 +296,18 @@ def claude_text(
 ) -> str:
     if not api_key:
         return ""
+    selected_model = model or DEFAULT_CLAUDE_MODEL
+    payload: dict[str, Any] = {
+        "model": selected_model,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+        "max_tokens": max_tokens,
+    }
+    # Opus 4.7+ / 4.8 reject non-default sampling parameters with HTTP 400.
+    # Let Anthropic use the default sampling for these models.
+    if not selected_model.startswith(("claude-opus-4-7", "claude-opus-4-8")):
+        payload["temperature"] = temperature
+
     response = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -303,17 +315,17 @@ def claude_text(
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
-        json={
-            "model": model or DEFAULT_CLAUDE_MODEL,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
+        json=payload,
         timeout=180,
         verify=SSL_VERIFY,
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        detail = truncate_text(response.text, 1200)
+        raise requests.HTTPError(
+            f"{response.status_code} Client Error: {response.reason} for url: {response.url}. "
+            f"Anthropic response: {detail}",
+            response=response,
+        )
     data = response.json()
     parts = data.get("content") or []
     return "\n".join(str(part.get("text") or "") for part in parts if part.get("type") == "text").strip()
