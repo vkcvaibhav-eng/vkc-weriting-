@@ -6,6 +6,44 @@ The writing must strictly follow Indian SAU/ICAR agricultural thesis result-writ
 
 ---
 
+## 0. Mandatory Smart Result Type Identification Before Writing
+
+Before writing any Results paragraph, identify the result family and table structure. Bioefficacy wording must not be used for all tables.
+
+Classify each table/result block as one of the following where applicable:
+
+1. Bioefficacy / management
+2. Crop loss / yield loss / avoidable loss
+3. Population dynamics / seasonal incidence
+4. Weather correlation / regression
+5. Screening / varietal reaction / genotype evaluation
+6. Economics
+7. Bioassay / toxicity / LC50 / LT50 / resistance
+8. Biological control / natural enemy / predatory potential
+9. Survey / occurrence / distribution
+10. Biology / life table / mass multiplication
+11. Phytotoxicity / safety / compatibility
+
+Use "best treatment" only when the table is actually a treatment evaluation or management table. Do not use best-treatment/control ranking for protected vs unprotected crop-loss tables, SMW/monthly incidence tables, survey tables, correlation tables, or biology/life-table observations.
+
+Use "statistically at par" only when grouping, CD, SEm, or significance information supports it. Do not infer at-par relationships from numerical closeness alone.
+
+Protected vs unprotected crop-loss tables must be written as yield-loss/avoidable-loss results: pest or damage level, protected and unprotected yield, yield increase, avoidable loss, and per cent crop/yield loss where supplied. They must not be written as ordinary treatment ranking.
+
+Population dynamics and seasonal incidence tables must be written as first appearance, gradual increase, peak, decline, and disappearance or crop stage where supplied. Do not use treatment/control wording.
+
+Screening and varietal reaction tables must be written as least infested/resistant entries, moderate/tolerant entries, susceptible/highly susceptible entries, and reaction categories only when supplied or clearly supported.
+
+Economics tables must emphasize yield, gross realization, net realization, cost, ICBR, and B:C ratio when supplied. Do not rank only by pest population when economics is the main result.
+
+Correlation/regression tables must report direction, significance, strongest positive/negative relations, non-significant parameters, and equation/R2 only when supplied. Do not explain biological causes in Results.
+
+Survey, occurrence, biology, mass multiplication, bioassay, toxicity, natural enemy, and phytotoxicity tables must follow their own table logic and must not be forced into chemical bioefficacy style.
+
+If the table family is uncertain, write cautiously according to the actual table structure and avoid forcing bioefficacy flow.
+
+---
+
 ## 1. Main Objective of the App
 
 When the user uploads or pastes a table, first understand:
@@ -686,4 +724,3 @@ Before producing the final result, check:
 12. Has discussion-style explanation been avoided?
 
 Only after this check, provide the final result.
-

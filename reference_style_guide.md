@@ -17,6 +17,20 @@ Use this guide only as secondary style support. The master SAU/ICAR prompt remai
 6. For correlation tables, state direction and significance for each weather parameter and avoid causal explanation unless discussion is requested.
 7. For economics, report gross realization, net realization, ICBR, and B:C ratio in descending practical importance when available.
 
+## Result Family-Specific Writing Guardrails
+
+1. Bioefficacy / management: use treatment-efficacy logic only for pesticide, acaricide, insecticide, fungicide, bioagent, spray, DAS/DAT, or pest/damage reduction tables. Write pre-treatment homogeneity if present, then spray-wise or pooled efficacy, lowest pest/damage treatment, supported at-par treatments, next best treatments, least effective treatment, and untreated check at the end.
+2. Crop loss / yield loss / avoidable loss: use protected vs unprotected or treated vs untreated comparison. Report pest/damage level, yield in protected and unprotected plots, yield increase, avoidable loss, and per cent yield/crop loss. Do not use "best treatment" unless multiple treatments are actually compared.
+3. Seasonal incidence / population dynamics: write first appearance, gradual increase, peak period with value, decline, and disappearance or crop stage. Do not use control or treatment-ranking wording.
+4. Screening / varietal reaction / genotype evaluation: write variation among entries, least infested or resistant entries, moderately resistant/tolerant entries, susceptible entries, and reaction categories only when supplied or clearly supported.
+5. Economics: emphasize yield, gross realization, net realization, cost of treatment, ICBR, and B:C ratio. The practical economic treatment may differ from the lowest pest-population treatment.
+6. Correlation / regression: report positive or negative correlation, significance level, strongest relations, non-significant parameters, and regression equation/R2 only when supplied. Do not add biological cause in Results.
+7. Survey / occurrence / distribution: report survey area, host/crop-wise occurrence, district/taluka/village-wise incidence, dominant pest/species, and notable occurrence only if supplied. Do not rank treatments.
+8. Biology / life table / mass multiplication: report stage-wise duration, shortest or longest period according to parameter, fecundity, survival, multiplication, and host/sex/treatment comparison. Do not use pesticide-efficacy wording.
+9. Bioassay / toxicity / resistance: write toxicity order, lowest LC50 as highest toxicity, highest LC50 as lowest toxicity, resistance ratio, fiducial limits, and slope only when relevant. Do not use field spray-wise style.
+10. Natural enemy / biological control: write predator, parasitoid, predator:prey ratio, release, predation, parasitization, suppression, or multiplication logic. Use biological control terms rather than chemical bioefficacy terms unless the table is pesticide compatibility/toxicity.
+11. Phytotoxicity / safety / compatibility: write safety parameter, lowest phytotoxicity or safest treatment, harmful treatment if any, and dose-wise trend. Do not call a treatment best for pest control unless pest-control data are supplied in that table.
+
 ## Observed Result-Writing Habits
 
 1. Start with a table callout: "The data are presented in Table..." or "The data presented in Table... revealed..."
@@ -96,4 +110,3 @@ Use middle-tier words only after the best and next-best treatments have been rep
 7. Never use transformed values as the displayed biological result.
 8. Never reproduce DNMRT, DMRT, or grouping letters such as `a`, `ab`, `bc`, or `c` in the final result write-up.
 9. Do not write the term "DNMRT" in the narrative unless the user explicitly asks for the statistical method name.
-

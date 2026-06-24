@@ -67,16 +67,19 @@ The Discussion must not be a generic literature summary. It should answer:
 
 Academic style has priority: the chosen author's framing, transitions, hedging, validation rhetoric, and paragraph movement should guide how the findings are justified through related work."""
 SAU_ICAR_RESULTS_PROMPT_FALLBACK = """SAU/ICAR thesis Results writing rules:
+- First identify the result/table family before writing. Do not force all tables into bioefficacy style.
 - Write formal Indian agricultural university Results style for entomology, acarology, plant protection, population dynamics, screening, yield, economics, and pest management experiments.
 - Use only supplied table/result values. Do not invent values, treatments, years, CD, SEm, CV, significance, or grouping.
 - If values appear as original (transformed), report only original values in the result narrative. Use transformed values only for statistical interpretation.
 - Use statistical grouping silently to decide statistically at par or significantly different treatments; never print grouping letters in the narrative.
-- Identify whether lower or higher value is desirable before ranking treatments.
-- Write table-wise, year-wise, spray-wise, pooled-wise, or treatment-wise according to the table structure.
-- Use the paragraph flow: table reference -> significance statement -> best treatment -> at par treatments -> next best/moderate treatments -> worst/control -> pooled result if available -> interaction at the end.
+- Identify whether lower or higher value is desirable before ranking anything.
+- Write table-wise, year-wise, spray-wise, pooled-wise, weekly, location-wise, parameter-wise, or economics-wise according to the table structure.
+- Use bioefficacy treatment ranking only for true treatment-management tables. Crop-loss, seasonal incidence, screening, economics, survey, biology, correlation, bioassay, and natural enemy tables require their own result logic.
 - Keep Results separate from Discussion. Do not explain causes or compare with literature in Results.
 - Use passive, examiner-oriented phrases such as significantly lowest, significantly highest, statistically at par with, differed significantly, recorded, registered, observed, exhibited, proved effective, and pooled data revealed.
-- Untreated control/check should usually be reported at the end.
+- Use "statistically at par" only when grouping, CD, SEm, or significance evidence supports it.
+- Use "best treatment" only when the table truly compares management treatments.
+- Untreated control/check should usually be reported at the end only for treatment-evaluation tables.
 - For unclear table values or statistical grouping, state that the value/statistical grouping was not clearly readable and was not interpreted."""
 
 
@@ -3351,6 +3354,156 @@ Raw methodology to rewrite:
     return chat_text(api_key, model, "You write precise Materials and Methods sections.", prompt, temperature=0.25)
 
 
+RESULT_FAMILY_GUARDRAILS = """
+Smart Result Type Diagnosis families and writing flows:
+
+A. BIOEFFICACY / MANAGEMENT
+Use only for acaricide, insecticide, fungicide, bioagent, spray, DAS/DAT, before/after spray,
+pest population reduction, damage reduction, or per cent reduction over control tables.
+Flow: table reference -> significance -> pre-treatment homogeneity if present -> spray-wise/DAS-wise result
+-> lowest pest or damage treatment -> at par treatments only if supported -> next best/moderate treatments
+-> least effective treatment -> untreated control/check at end -> pooled result -> interaction at end.
+
+B. CROP LOSS / YIELD LOSS / AVOIDABLE LOSS
+Use for protected vs unprotected, treated vs untreated, avoidable yield loss, per cent loss,
+yield increase, preventable loss, or crop damage loss tables.
+Flow: table reference -> pest/damage level in protected and unprotected plots -> yield in protected
+and unprotected plots -> yield increase or avoidable yield loss -> per cent crop/yield loss -> economics if included.
+Do not use best-treatment or at-par wording unless there are multiple treatments and statistical grouping supports it.
+
+C. POPULATION DYNAMICS / SEASONAL INCIDENCE
+Use for SMW, month, week, first appearance, peak population, decline, crop stage, or weather-linked incidence.
+Flow: table/figure reference -> first appearance -> gradual increase -> peak period and value -> decline/disappearance
+-> weather correlation only if supplied. No treatment ranking.
+
+D. WEATHER CORRELATION / REGRESSION
+Use for r values, regression, weather parameters, temperature, humidity, rainfall, sunshine, wind, R2, or equations.
+Flow: table reference -> direction of correlation -> significance level -> strongest positive/negative relation
+-> non-significant parameters -> regression equation/R2 only if supplied. No treatment ranking or biological explanation.
+
+E. SCREENING / VARIETAL REACTION / GENOTYPE EVALUATION
+Use for variety, genotype, hybrid, entry, germplasm, resistant, susceptible, or reaction category tables.
+Flow: table reference -> variation among entries -> resistant/least infested entries -> moderately resistant/tolerant
+entries -> susceptible/highly susceptible entries -> classification only if supplied or clearly supported.
+No pesticide bioefficacy wording.
+
+F. ECONOMICS
+Use for yield, gross realization, net realization, cost of treatment, ICBR, B:C ratio, or avoidable-loss economics.
+Flow: table reference -> highest yield -> highest gross realization -> highest net realization -> highest ICBR/B:C
+-> practical economical treatment -> lower/least economic treatment. Do not rank only by pest population.
+
+G. BIOASSAY / TOXICITY / LC50 / LT50 / RESISTANCE
+Use for LC50, LC90, LT50, slope, fiducial limit, resistance ratio, toxicity index, or probit tables.
+Flow: table reference -> toxicity order -> lowest LC50/highest toxicity -> highest LC50/lowest toxicity
+-> resistance ratio interpretation -> fiducial limits/slope only when required. No field spray-wise style.
+
+H. BIOLOGICAL CONTROL / NATURAL ENEMY / PREDATORY POTENTIAL
+Use for predators, parasitoids, predator:prey ratio, release, predation rate, multiplication, or parasitization.
+Flow: table reference -> predator/prey or release effect -> highest suppression or multiplication/parasitization
+-> next effective ratio/treatment -> least effective ratio/control -> pooled result. Use biological control terms.
+
+I. SURVEY / OCCURRENCE / DISTRIBUTION
+Use for villages, talukas, districts, host plants, incidence, occurrence, species lists, or natural enemy occurrence.
+Flow: survey area reference -> crop/host-wise occurrence -> district/taluka/village-wise incidence
+-> dominant pest/species -> notable occurrence only if supplied. No treatment ranking.
+
+J. BIOLOGY / LIFE TABLE / MASS MULTIPLICATION
+Use for egg, larva/nymph, adult longevity, fecundity, incubation, development, survival, or multiplication tables.
+Flow: table reference -> stage-wise duration or multiplication -> shortest/longest period according to parameter
+-> highest fecundity/survival/multiplication -> sex, host, or treatment comparison. No pesticide ranking.
+
+K. PHYTOTOXICITY / SAFETY / COMPATIBILITY
+Use for leaf injury, yellowing, necrosis, wilting, epinasty, safety to natural enemies, or toxicity to predators/parasitoids.
+Flow: table reference -> safety/toxicity parameter -> lowest phytotoxicity or safest treatment -> harmful treatment if any
+-> dose-wise trend -> no best-pest-control wording unless a pest-control table is also supplied.
+"""
+
+
+RESULT_DIAGNOSIS_FALLBACK = {
+    "overall_result_family": "UNSPECIFIED",
+    "tables": [],
+    "global_warnings": [
+        "Diagnosis failed; write according to actual table structure and avoid forcing bioefficacy flow."
+    ],
+}
+
+
+# Manual checks for this diagnosis step:
+# 1. Protected vs unprotected crop-loss tables should not be written as best-treatment bioefficacy.
+# 2. SMW/month incidence tables should describe first appearance, peak, and decline, not control ranking.
+# 3. Screening tables should use resistant/tolerant/susceptible logic, not spray wording.
+# 4. Economics tables should prioritize net realization, ICBR, and B:C when supplied.
+def diagnose_result_tables(
+    api_key: str,
+    model: str,
+    common: str,
+    table_summaries: str,
+    image_summaries: str,
+) -> dict[str, Any]:
+    fallback = json.loads(json.dumps(RESULT_DIAGNOSIS_FALLBACK))
+    if not api_key:
+        return fallback
+
+    prompt = f"""
+Diagnose the uploaded result evidence before the Results section is written.
+
+Your task is classification only. Do not write the Results section.
+Return only a JSON object. Do not include markdown.
+
+Possible result families:
+{RESULT_FAMILY_GUARDRAILS}
+
+For each detected table/result block, return:
+table_label, detected_result_family, confidence, reason, main_parameter, unit,
+desirable_direction ("lower", "higher", or "context-dependent"),
+structure (year-wise/spray-wise/pooled/weekly/location-wise/economics/etc.),
+should_not_use_bioefficacy_flow (true/false),
+recommended_writing_flow.
+
+Rules:
+- BIOEFFICACY / MANAGEMENT is only for true treatment-management or spray-efficacy tables.
+- Protected vs unprotected crop-loss tables must be CROP LOSS / YIELD LOSS / AVOIDABLE LOSS.
+- SMW/week/month/weather incidence tables must be POPULATION DYNAMICS / SEASONAL INCIDENCE unless they are correlation matrices.
+- Variety/genotype/hybrid tables must be SCREENING / VARIETAL REACTION / GENOTYPE EVALUATION.
+- Economics tables must be ECONOMICS when net return, ICBR, B:C, cost, gross realization, or net realization are central.
+- If uncertain, choose UNSPECIFIED and warn against forcing bioefficacy flow.
+
+Research context:
+{truncate_text(common, 6000)}
+
+Table evidence:
+{truncate_text(table_summaries, 12000)}
+
+Graph or image evidence:
+{truncate_text(image_summaries, 6000)}
+
+Return JSON keys:
+overall_result_family, tables, global_warnings.
+"""
+    try:
+        text = chat_text(
+            api_key,
+            model,
+            "You classify agricultural result tables before manuscript Results writing.",
+            prompt,
+            temperature=0.05,
+            response_format={"type": "json_object"},
+        )
+        parsed = parse_json_object(text, fallback)
+        for key, value in fallback.items():
+            parsed.setdefault(key, value)
+        if not isinstance(parsed.get("tables"), list):
+            parsed["tables"] = []
+        if not isinstance(parsed.get("global_warnings"), list):
+            parsed["global_warnings"] = []
+        if not parsed.get("overall_result_family"):
+            parsed["overall_result_family"] = "UNSPECIFIED"
+        return parsed
+    except Exception as exc:
+        fallback["global_warnings"] = list(fallback.get("global_warnings", [])) + [f"Diagnosis error: {exc}"]
+        return fallback
+
+
 def write_results(
     api_key: str,
     model: str,
@@ -3360,11 +3513,18 @@ def write_results(
     image_summaries: str,
 ) -> str:
     sau_icar_results_prompt = load_sau_icar_results_prompt()
+    result_diagnosis = diagnose_result_tables(api_key, model, common, table_summaries, image_summaries)
     prompt = f"""
 Write the Results section only.
 
 Mandatory SAU/ICAR thesis-style result-writing rulebook:
 {truncate_text(sau_icar_results_prompt, 22000)}
+
+Smart Result Type Diagnosis from Stage 1. Use this internally only; do not print this JSON or any diagnosis heading:
+{json.dumps(result_diagnosis, ensure_ascii=True, indent=2)[:16000]}
+
+Result family-specific guardrails:
+{truncate_text(RESULT_FAMILY_GUARDRAILS, 12000)}
 
 Strict style contract:
 {style_excerpt(styles, "style_contract", 5000)}
@@ -3375,17 +3535,33 @@ Preferred result vocabulary:
 
 Rules:
 - Use the SAU/ICAR rulebook as the primary authority for Results writing and table interpretation.
+- Before writing each table/result block, silently decide: What is the table about? Is it pest population, damage, yield,
+  crop loss, economics, weather correlation, incidence, biology, screening, survey, toxicity, or safety?
+- Follow the detected result family first. Use bioefficacy flow only when the detected family is BIOEFFICACY / MANAGEMENT.
+- For CROP LOSS / YIELD LOSS / AVOIDABLE LOSS, write protected vs unprotected, yield increase, avoidable loss, and per cent loss;
+  do not rank protected/unprotected as ordinary best treatments.
+- For POPULATION DYNAMICS / SEASONAL INCIDENCE, write first appearance, increase, peak, and decline; do not write treatment/control ranking.
+- For WEATHER CORRELATION / REGRESSION, write direction, significance, strongest relations, non-significant parameters, and equation/R2 only when supplied.
+- For SCREENING / VARIETAL REACTION, write least infested/resistant, moderate/tolerant, and susceptible entries; do not use pesticide spray wording.
+- For ECONOMICS, emphasize yield, gross realization, net realization, ICBR, and B:C ratio when supplied; do not rank only by pest population.
+- For SURVEY / OCCURRENCE / DISTRIBUTION, write location/host/species occurrence; do not use treatment ranking.
+- For BIOLOGY / LIFE TABLE / MASS MULTIPLICATION, write stage-wise duration, survival, fecundity, or multiplication logic; do not use pesticide ranking.
+- For BIOASSAY / TOXICITY, write LC50/LC90/LT50 toxicity order and resistance interpretation; do not use field spray-wise style.
+- For BIOLOGICAL CONTROL / NATURAL ENEMY, use suppression, predation, parasitization, predator:prey, release, or multiplication wording.
+- If diagnosis is UNSPECIFIED or uncertain, write cautiously from the actual table structure and avoid forcing bioefficacy wording.
 - Use only supplied result evidence. Do not invent treatments, values, statistical groupings, years, sprays, pooled means, or units.
 - If original and transformed values are present, write only the original values in the narrative; use transformed values only for significance/statistical grouping.
 - Do not print DNMRT/DMRT/CD grouping letters or transformed values in the final Results narrative.
 - Use phrases such as significantly lowest, significantly highest, statistically at par with, differed significantly,
   non-significant, minimum, maximum, highest, least, pooled data revealed, recorded, registered, observed, and exhibited only when supported.
 - Refer to tables and figures where appropriate, and organize paragraphs table-wise, year-wise, spray-wise, pooled-wise, or treatment-wise according to the evidence.
-- For each table/parameter, follow the flow: table reference, significance statement, best treatment, statistically at par treatments,
-  next best or moderate treatments, worst/control treatment, pooled result if available, and interaction only at the end.
+- Use "best treatment" only when the table truly compares management treatments.
+- Use "statistically at par" only when grouping, CD, SEm, or significance evidence supports it.
+- Put interaction information at the end of the relevant paragraph.
 - Do not compare with other authors in this section.
 - If statistical significance is not supplied, describe numerical trends cautiously.
-- Do not include "Table Understanding", "Statistical Note", or quality-check headings in the manuscript Results section.
+- Do not include "Table Diagnosis", "Result Family", "Table Understanding", "Statistical Note", "AI Interpretation",
+  or quality-check headings in the manuscript Results section.
 - If a value or grouping is unclear, state briefly that it was not clearly readable and was not interpreted.
 
 {common}
