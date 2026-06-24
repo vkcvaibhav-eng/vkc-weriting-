@@ -110,3 +110,4 @@ Use middle-tier words only after the best and next-best treatments have been rep
 7. Never use transformed values as the displayed biological result.
 8. Never reproduce DNMRT, DMRT, or grouping letters such as `a`, `ab`, `bc`, or `c` in the final result write-up.
 9. Do not write the term "DNMRT" in the narrative unless the user explicitly asks for the statistical method name.
+
