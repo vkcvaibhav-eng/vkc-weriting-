@@ -766,316 +766,347 @@ with tabs[2]:
     )
     top[4].metric("AI scoring", "On" if st.session_state.use_ai_scoring else "Off")
 
-    st.markdown("### Results-First Planning")
-    if st.button("Analyze findings, write Results, and build Discussion Framework", type="primary", width="stretch"):
-        if not (inputs["master_context"] or inputs["raw_methodology"] or extracted_files):
-            st.warning("Add methodology, master context, or result files before analyzing.")
-        else:
-            with st.spinner(
-                "Analyzing findings, writing Results, building the Discussion framework, and asking Claude to plan the evidence search..."
-            ):
-                analysis, result_text, queries = build_context_for_search(inputs, extracted_files)
-            st.session_state.analysis = analysis
-            st.session_state.queries = queries
-            st.session_state.paper_search = {}
-            st.session_state.selected_papers = []
-            st.session_state.downloaded_references = []
-            st.session_state.gemini_recommendations = {}
-            st.session_state.followup_suggestions = {}
-            st.success("Results draft, Discussion framework, and Claude evidence plan are ready below.")
+    query_tab, finding_tab, selection_tab = st.tabs(
+        ["Query Making", "Reference Finding", "Reference Selection & Reading"]
+    )
 
-    analysis_state = st.session_state.get("analysis") or {}
-    if analysis_state:
-        with st.expander("Research questions and result logic", expanded=True):
-            if analysis_state.get("analysis_title"):
-                st.write("Working title")
-                st.write(analysis_state.get("analysis_title"))
-            if analysis_state.get("objective"):
-                st.write("Objective")
-                st.write(analysis_state.get("objective"))
-            for label, key in [
-                ("Treatments / variables", "treatments_variables"),
-                ("Major findings", "major_findings"),
-                ("Significant differences", "significant_differences"),
-                ("Patterns and trends", "result_patterns"),
-                ("Likely research questions", "research_questions"),
-                ("Discussion needs", "discussion_needs"),
-            ]:
-                values = analysis_state.get(key) or []
-                if values:
-                    st.write(label)
-                    for value in values:
-                        st.write(value)
-
-        if analysis_state.get("results_draft") or analysis_state.get("results_draft_error"):
-            with st.expander("Results draft from analyzed findings", expanded=True):
-                st.caption("Written first from uploaded tables, figures, methodology context, and extracted result text.")
-                if analysis_state.get("results_draft_error"):
-                    st.warning(analysis_state.get("results_draft_error"))
-                if analysis_state.get("results_draft"):
-                    st.markdown(analysis_state.get("results_draft"))
-
-        discussion_framework = analysis_state.get("discussion_framework") or {}
-        if discussion_framework:
-            with st.expander("Discussion framework from Results", expanded=True):
-                provider = discussion_framework.get("framework_provider") or ""
-                model_used = discussion_framework.get("framework_model") or ""
-                if provider or model_used:
-                    st.caption(f"Framework engine: {provider} {model_used}".strip())
-                if discussion_framework.get("claude_framework_error"):
-                    st.warning(f"Claude framework warning: {discussion_framework.get('claude_framework_error')}")
-                if discussion_framework.get("style_priority"):
-                    st.write("Style priority")
-                    st.write(discussion_framework.get("style_priority"))
-                if discussion_framework.get("discussion_thesis"):
-                    st.write("Discussion thesis")
-                    st.write(discussion_framework.get("discussion_thesis"))
-                paragraph_framework = discussion_framework.get("paragraph_framework") or []
-                if paragraph_framework:
-                    st.write("Paragraph framework")
-                    for item in paragraph_framework:
-                        st.write(item)
-                citation_strategy = discussion_framework.get("citation_strategy") or []
-                if citation_strategy:
-                    st.write("Citation strategy")
-                    for item in citation_strategy:
-                        st.write(item)
-
-        claude_plan = analysis_state.get("claude_discussion_search_plan") or {}
-        if claude_plan:
-            with st.expander("Claude discussion evidence plan", expanded=True):
-                provider = claude_plan.get("query_provider") or "Claude"
-                model_used = claude_plan.get("model_used") or st.session_state.claude_model
-                st.caption(
-                    f"{provider} planned what paper types are needed for the Discussion, then the same search engines used those queries."
-                )
-                if model_used:
-                    st.caption(f"Model: {model_used}")
-                if claude_plan.get("claude_query_error"):
-                    st.warning(f"Claude query planning warning: {claude_plan.get('claude_query_error')}")
-                needed_types = claude_plan.get("needed_paper_types") or []
-                if needed_types:
-                    st.write("Needed paper types")
-                    for item in needed_types:
-                        st.write(item)
-                rationales = claude_plan.get("query_rationale") or []
-                if rationales:
-                    st.write("Why these queries were made")
-                    for item in rationales:
-                        st.write(item)
-                missing_questions = claude_plan.get("missing_evidence_questions") or []
-                if missing_questions:
-                    st.write("Questions to answer through reading")
-                    for item in missing_questions:
-                        st.write(item)
-
-    if st.session_state.get("queries"):
-        with st.expander("Search queries from Results and Discussion plan", expanded=True):
-            for query in st.session_state.queries:
-                st.code(query, language="text")
-
-        st.divider()
-        st.subheader("Search Papers From This Plan")
-        st.caption("Run this after reviewing the Results draft, Discussion framework, and Claude evidence plan above.")
-        if st.button("Search papers using these planned queries", type="primary", width="stretch"):
-            analysis = st.session_state.get("analysis") or {}
-            context_text = current_context_text(inputs, extracted_files, analysis)
-            with st.spinner("Searching, deduplicating, and scoring papers from the planned Discussion queries..."):
-                search_result = search_and_rank_papers(
-                    queries=st.session_state.queries,
-                    context_text=context_text,
-                    semantic_key=st.session_state.semantic_key,
-                    serpapi_key=st.session_state.serpapi_key,
-                    core_key=st.session_state.core_key,
-                    perplexity_key=st.session_state.perplexity_key,
-                    perplexity_model=st.session_state.perplexity_model,
-                    openai_key=st.session_state.openai_key,
-                    model=st.session_state.model,
-                    reference_count=st.session_state.reference_count,
-                    per_query_limit=st.session_state.per_query_limit,
-                    use_ai_scoring=st.session_state.use_ai_scoring,
-                )
-            st.session_state.paper_search = search_result
-            st.session_state.selected_papers = search_result.get("selected", [])
-            st.session_state.downloaded_references = []
-            st.session_state.gemini_recommendations = {}
-            st.success(
-                f"Found {search_result.get('candidate_count', 0)} candidates, "
-                f"{search_result.get('deduped_count', 0)} after deduplication, "
-                f"{len(st.session_state.selected_papers)} selected."
-            )
-
-    search_result = st.session_state.get("paper_search") or {}
-    deep_queries = search_result.get("deep_queries") or {}
-    if deep_queries:
-        with st.expander("Independent agri deep-search queries", expanded=False):
-            for label, key in [
-                ("Journal/research article", "journal_queries"),
-                ("Thesis/dissertation", "thesis_queries"),
-                ("Review paper", "review_queries"),
-            ]:
-                queries_for_layer = deep_queries.get(key) or []
-                if queries_for_layer:
-                    st.markdown(f"**{label}**")
-                    for query in queries_for_layer:
-                        st.code(query, language="text")
-
-    warnings = search_result.get("warnings", [])
-    if warnings:
-        with st.expander("Search warnings", expanded=False):
-            for warning in warnings:
-                st.warning(warning)
-
-    quota_status = search_result.get("quota_status") or {}
-    if quota_status:
-        selected_counts = quota_status.get("selected_counts", {})
-        req_cols = st.columns(3)
-        req_cols[0].metric("Selected research articles", f"{selected_counts.get('Research Article', 0)}/10")
-        req_cols[1].metric("Selected theses", f"{selected_counts.get('Thesis', 0)}/3")
-        req_cols[2].metric("Selected review papers", f"{selected_counts.get('Review Paper', 0)}/1")
-
-    papers = search_result.get("papers", [])
-    if papers:
-        df = paper_rows(papers)
-        category_counts = df["category"].value_counts().to_dict() if "category" in df else {}
-        count_cols = st.columns(3)
-        count_cols[0].metric("Research articles", category_counts.get("Research Article", 0))
-        count_cols[1].metric("Review papers", category_counts.get("Review Paper", 0))
-        count_cols[2].metric("Theses", category_counts.get("Thesis", 0))
+    with query_tab:
+        st.markdown("### Results-First Query Making")
         st.caption(
-            "Select sources separately by type. The app will merge the chosen research papers, review papers, and theses for downloading, Gemini reading, and drafting."
+            "Write the Results first, build the Discussion framework, and prepare the style-aware search queries before reference searching."
         )
-        category_sections = [
-            ("Research papers", "Research Article", "research_articles"),
-            ("Review papers", "Review Paper", "review_papers"),
-            ("Theses / dissertations", "Thesis", "theses"),
-        ]
-        known_categories = {category for _label, category, _key in category_sections}
-        other_papers = [paper for paper in papers if paper.get("category", "Research Article") not in known_categories]
-        if other_papers:
-            category_sections.append(("Other sources", "__OTHER__", "other_sources"))
+        if st.button("Analyze findings, write Results, and build Discussion Framework", type="primary", width="stretch"):
+            if not (inputs["master_context"] or inputs["raw_methodology"] or extracted_files):
+                st.warning("Add methodology, master context, or result files before analyzing.")
+            else:
+                with st.spinner(
+                    "Analyzing findings, writing Results, building the Discussion framework, and asking Claude to plan the evidence search..."
+                ):
+                    analysis, result_text, queries = build_context_for_search(inputs, extracted_files)
+                st.session_state.analysis = analysis
+                st.session_state.queries = queries
+                st.session_state.paper_search = {}
+                st.session_state.selected_papers = []
+                st.session_state.downloaded_references = []
+                st.session_state.gemini_recommendations = {}
+                st.session_state.followup_suggestions = {}
+                st.success("Results draft, Discussion framework, and Claude evidence plan are ready below.")
 
-        edited_frames = []
-        selection_tabs = st.tabs([label for label, _category, _key in category_sections])
-        for tab, (label, category, key_suffix) in zip(selection_tabs, category_sections):
-            with tab:
-                if category == "__OTHER__":
-                    category_papers = other_papers
-                else:
-                    category_papers = [paper for paper in papers if paper.get("category", "Research Article") == category]
-                selected_in_category = len([paper for paper in category_papers if paper.get("selected")])
-                st.caption(f"{len(category_papers)} found; {selected_in_category} currently selected.")
-                if category_papers:
-                    edited_frames.append(paper_selection_editor(category_papers, f"evidence_select_{key_suffix}"))
-                else:
-                    st.info(f"No {label.lower()} found yet.")
+        analysis_state = st.session_state.get("analysis") or {}
+        if analysis_state:
+            with st.expander("Research questions and result logic", expanded=True):
+                if analysis_state.get("analysis_title"):
+                    st.write("Working title")
+                    st.write(analysis_state.get("analysis_title"))
+                if analysis_state.get("objective"):
+                    st.write("Objective")
+                    st.write(analysis_state.get("objective"))
+                for label, key in [
+                    ("Treatments / variables", "treatments_variables"),
+                    ("Major findings", "major_findings"),
+                    ("Significant differences", "significant_differences"),
+                    ("Patterns and trends", "result_patterns"),
+                    ("Likely research questions", "research_questions"),
+                    ("Discussion needs", "discussion_needs"),
+                ]:
+                    values = analysis_state.get(key) or []
+                    if values:
+                        st.write(label)
+                        for value in values:
+                            st.write(value)
 
-        if st.button("Save selected sources from all sections", width="stretch"):
-            selected_ids = set()
-            for edited in edited_frames:
-                selected_ids.update(edited.loc[edited["selected"] == True, "paper_id"].astype(str).tolist())
-            selected = []
-            for paper in papers:
-                paper["selected"] = str(paper.get("paper_id")) in selected_ids
-                if paper["selected"]:
-                    selected.append(paper)
-            st.session_state.paper_search["papers"] = papers
-            st.session_state.selected_papers = selected
-            st.session_state.downloaded_references = [
-                item for item in st.session_state.get("downloaded_references", []) if str(item.get("paper_id")) in selected_ids
-            ]
-            selected_summary = pd.DataFrame(
-                [
-                    {"category": category, "selected": len([p for p in selected if p.get("category") == category])}
-                    for category in ["Research Article", "Review Paper", "Thesis"]
-                ]
-            )
-            st.success(f"Saved {len(selected)} selected source(s) from separate evidence sections.")
-            st.dataframe(selected_summary, width="stretch", hide_index=True)
+            if analysis_state.get("results_draft") or analysis_state.get("results_draft_error"):
+                with st.expander("Results draft from analyzed findings", expanded=True):
+                    st.caption("Written first from uploaded tables, figures, methodology context, and extracted result text.")
+                    if analysis_state.get("results_draft_error"):
+                        st.warning(analysis_state.get("results_draft_error"))
+                    if analysis_state.get("results_draft"):
+                        st.markdown(analysis_state.get("results_draft"))
 
-        selected_papers = st.session_state.get("selected_papers", [])
-        if selected_papers:
-            st.divider()
-            st.subheader("Download and Read Selected Papers")
-            st.caption(
-                "Use this before drafting so the discussion can use full-paper text, not only title or abstract."
-            )
-            dl_cols = st.columns(4)
-            dl_cols[0].metric("Selected", len(selected_papers))
-            dl_cols[1].metric("With PDF clue", len([p for p in selected_papers if p.get("pdf_url") or p.get("pdf_urls")]))
-            downloaded_refs = st.session_state.get("downloaded_references", [])
-            dl_cols[2].metric("Downloaded", len([p for p in downloaded_refs if p.get("download_success")]))
-            dl_cols[3].metric("Readable chars", sum(int(p.get("full_text_chars") or 0) for p in downloaded_refs))
+            discussion_framework = analysis_state.get("discussion_framework") or {}
+            if discussion_framework:
+                with st.expander("Discussion framework from Results", expanded=True):
+                    provider = discussion_framework.get("framework_provider") or ""
+                    model_used = discussion_framework.get("framework_model") or ""
+                    if provider or model_used:
+                        st.caption(f"Framework engine: {provider} {model_used}".strip())
+                    if discussion_framework.get("claude_framework_error"):
+                        st.warning(f"Claude framework warning: {discussion_framework.get('claude_framework_error')}")
+                    if discussion_framework.get("style_priority"):
+                        st.write("Style priority")
+                        st.write(discussion_framework.get("style_priority"))
+                    if discussion_framework.get("discussion_thesis"):
+                        st.write("Discussion thesis")
+                        st.write(discussion_framework.get("discussion_thesis"))
+                    paragraph_framework = discussion_framework.get("paragraph_framework") or []
+                    if paragraph_framework:
+                        st.write("Paragraph framework")
+                        for item in paragraph_framework:
+                            st.write(item)
+                    citation_strategy = discussion_framework.get("citation_strategy") or []
+                    if citation_strategy:
+                        st.write("Citation strategy")
+                        for item in citation_strategy:
+                            st.write(item)
 
-            if st.button("Download and read selected PDFs", type="primary", width="stretch"):
-                with st.spinner("Finding open PDFs, downloading selected papers, and extracting full text..."):
-                    downloaded = download_and_read_selected_papers(
-                        selected_papers,
+            claude_plan = analysis_state.get("claude_discussion_search_plan") or {}
+            if claude_plan:
+                with st.expander("Claude discussion evidence plan", expanded=True):
+                    provider = claude_plan.get("query_provider") or "Claude"
+                    model_used = claude_plan.get("model_used") or st.session_state.claude_model
+                    st.caption(
+                        f"{provider} planned what paper types are needed for the Discussion, then the same search engines used those queries."
+                    )
+                    if model_used:
+                        st.caption(f"Model: {model_used}")
+                    if claude_plan.get("claude_query_error"):
+                        st.warning(f"Claude query planning warning: {claude_plan.get('claude_query_error')}")
+                    needed_types = claude_plan.get("needed_paper_types") or []
+                    if needed_types:
+                        st.write("Needed paper types")
+                        for item in needed_types:
+                            st.write(item)
+                    rationales = claude_plan.get("query_rationale") or []
+                    if rationales:
+                        st.write("Why these queries were made")
+                        for item in rationales:
+                            st.write(item)
+                    missing_questions = claude_plan.get("missing_evidence_questions") or []
+                    if missing_questions:
+                        st.write("Questions to answer through reading")
+                        for item in missing_questions:
+                            st.write(item)
+
+        if st.session_state.get("queries"):
+            with st.expander("Search queries from Results and Discussion plan", expanded=True):
+                for query in st.session_state.queries:
+                    st.code(query, language="text")
+        else:
+            st.info("Run the analysis above to write Results and create search queries.")
+
+    with finding_tab:
+        st.markdown("### Reference Finding")
+        st.caption("Use the planned queries to search and rank research papers, review papers, and theses.")
+        if st.session_state.get("queries"):
+            with st.expander("Queries to search", expanded=True):
+                for query in st.session_state.queries:
+                    st.code(query, language="text")
+            if st.button("Search papers using these planned queries", type="primary", width="stretch"):
+                analysis = st.session_state.get("analysis") or {}
+                context_text = current_context_text(inputs, extracted_files, analysis)
+                with st.spinner("Searching, deduplicating, and scoring papers from the planned Discussion queries..."):
+                    search_result = search_and_rank_papers(
+                        queries=st.session_state.queries,
+                        context_text=context_text,
+                        semantic_key=st.session_state.semantic_key,
                         serpapi_key=st.session_state.serpapi_key,
                         core_key=st.session_state.core_key,
-                        semantic_key=st.session_state.semantic_key,
+                        perplexity_key=st.session_state.perplexity_key,
+                        perplexity_model=st.session_state.perplexity_model,
+                        openai_key=st.session_state.openai_key,
+                        model=st.session_state.model,
+                        reference_count=st.session_state.reference_count,
+                        per_query_limit=st.session_state.per_query_limit,
+                        use_ai_scoring=st.session_state.use_ai_scoring,
                     )
-                if st.session_state.gemini_key:
-                    context_text = current_context_text(inputs, extracted_files)
-                    with st.spinner("Google Gemini is reading papers, thesis literature reviews, and thesis references..."):
-                        downloaded = gemini_read_selected_papers(
-                            downloaded,
-                            context_text,
-                            st.session_state.gemini_key,
-                            st.session_state.gemini_model,
-                            current_style_profile(),
-                        )
-                        st.session_state.gemini_recommendations = summarize_gemini_reference_notes(
-                            downloaded,
-                            context_text,
-                            st.session_state.gemini_key,
-                            st.session_state.gemini_model,
-                            current_style_profile(),
-                        )
-                by_id = {str(item.get("paper_id")): item for item in downloaded}
-                st.session_state.selected_papers = [by_id.get(str(p.get("paper_id")), p) for p in selected_papers]
-                st.session_state.downloaded_references = downloaded
-                if st.session_state.paper_search.get("papers"):
-                    updated_papers = []
-                    for paper in st.session_state.paper_search["papers"]:
-                        updated_papers.append(by_id.get(str(paper.get("paper_id")), paper))
-                    st.session_state.paper_search["papers"] = updated_papers
-                success_count = len([p for p in downloaded if p.get("download_success")])
-                gemini_count = len([p for p in downloaded if p.get("gemini_note")])
-                if st.session_state.gemini_key:
-                    st.success(f"Downloaded/read {success_count}/{len(downloaded)} PDF(s); Gemini read {gemini_count} selected source(s).")
-                else:
-                    st.success(f"Downloaded/read {success_count}/{len(downloaded)} selected paper(s). Add a Gemini key to read and rank the sources.")
+                st.session_state.paper_search = search_result
+                st.session_state.selected_papers = search_result.get("selected", [])
+                st.session_state.downloaded_references = []
+                st.session_state.gemini_recommendations = {}
+                st.success(
+                    f"Found {search_result.get('candidate_count', 0)} candidates, "
+                    f"{search_result.get('deduped_count', 0)} after deduplication, "
+                    f"{len(st.session_state.selected_papers)} selected."
+                )
+        else:
+            st.info("First use the Query Making tab to analyze findings and create search queries.")
 
-            downloaded_refs = st.session_state.get("downloaded_references", [])
-            if downloaded_refs:
-                download_rows = [
-                    {
-                        "status": "downloaded" if item.get("download_success") else "not found",
-                        "method": item.get("download_method", ""),
-                        "text_status": item.get("text_status", ""),
-                        "text_engine": item.get("text_extraction_method", ""),
-                        "chars": item.get("full_text_chars", 0),
-                        "size_mb": round((item.get("pdf_size_bytes", 0) or 0) / 1024 / 1024, 2),
-                        "category": item.get("category", ""),
-                        "gemini": item.get("gemini_read_status", ""),
-                        "title": item.get("title", ""),
-                        "pdf_path": item.get("pdf_path", ""),
-                    }
-                    for item in downloaded_refs
-                ]
-                st.dataframe(pd.DataFrame(download_rows), width="stretch", hide_index=True)
+        search_result = st.session_state.get("paper_search") or {}
+        deep_queries = search_result.get("deep_queries") or {}
+        if deep_queries:
+            with st.expander("Independent agri deep-search queries", expanded=False):
+                for label, key in [
+                    ("Journal/research article", "journal_queries"),
+                    ("Thesis/dissertation", "thesis_queries"),
+                    ("Review paper", "review_queries"),
+                ]:
+                    queries_for_layer = deep_queries.get(key) or []
+                    if queries_for_layer:
+                        st.markdown(f"**{label}**")
+                        for query in queries_for_layer:
+                            st.code(query, language="text")
 
-            with st.expander("APA 7 reference preview", expanded=False):
-                for paper in st.session_state.get("selected_papers", []):
-                    if include_in_final_references(paper):
-                        st.write(format_apa_reference(paper))
-                skipped_theses = [
-                    paper for paper in st.session_state.get("selected_papers", [])
-                    if (paper.get("category") == "Thesis" and not include_in_final_references(paper))
+        warnings = search_result.get("warnings", [])
+        if warnings:
+            with st.expander("Search warnings", expanded=False):
+                for warning in warnings:
+                    st.warning(warning)
+
+        quota_status = search_result.get("quota_status") or {}
+        if quota_status:
+            selected_counts = quota_status.get("selected_counts", {})
+            req_cols = st.columns(3)
+            req_cols[0].metric("Selected research articles", f"{selected_counts.get('Research Article', 0)}/10")
+            req_cols[1].metric("Selected theses", f"{selected_counts.get('Thesis', 0)}/3")
+            req_cols[2].metric("Selected review papers", f"{selected_counts.get('Review Paper', 0)}/1")
+
+        papers = search_result.get("papers", [])
+        if papers:
+            df = paper_rows(papers)
+            category_counts = df["category"].value_counts().to_dict() if "category" in df else {}
+            count_cols = st.columns(3)
+            count_cols[0].metric("Research articles found", category_counts.get("Research Article", 0))
+            count_cols[1].metric("Review papers found", category_counts.get("Review Paper", 0))
+            count_cols[2].metric("Theses found", category_counts.get("Thesis", 0))
+            st.info("Go to Reference Selection & Reading to choose sources separately by type.")
+
+    with selection_tab:
+        st.markdown("### Reference Selection and Reading")
+        search_result = st.session_state.get("paper_search") or {}
+        papers = search_result.get("papers", [])
+        if not papers:
+            st.info("Run Reference Finding first. Search results will appear here for separate selection.")
+        else:
+            df = paper_rows(papers)
+            category_counts = df["category"].value_counts().to_dict() if "category" in df else {}
+            count_cols = st.columns(3)
+            count_cols[0].metric("Research articles", category_counts.get("Research Article", 0))
+            count_cols[1].metric("Review papers", category_counts.get("Review Paper", 0))
+            count_cols[2].metric("Theses", category_counts.get("Thesis", 0))
+            st.caption(
+                "Select sources separately by type. The app will merge the chosen research papers, review papers, and theses for downloading, Gemini reading, and drafting."
+            )
+            category_sections = [
+                ("Research papers", "Research Article", "research_articles"),
+                ("Review papers", "Review Paper", "review_papers"),
+                ("Theses / dissertations", "Thesis", "theses"),
+            ]
+            known_categories = {category for _label, category, _key in category_sections}
+            other_papers = [paper for paper in papers if paper.get("category", "Research Article") not in known_categories]
+            if other_papers:
+                category_sections.append(("Other sources", "__OTHER__", "other_sources"))
+
+            edited_frames = []
+            selection_tabs = st.tabs([label for label, _category, _key in category_sections])
+            for tab, (label, category, key_suffix) in zip(selection_tabs, category_sections):
+                with tab:
+                    if category == "__OTHER__":
+                        category_papers = other_papers
+                    else:
+                        category_papers = [paper for paper in papers if paper.get("category", "Research Article") == category]
+                    selected_in_category = len([paper for paper in category_papers if paper.get("selected")])
+                    st.caption(f"{len(category_papers)} found; {selected_in_category} currently selected.")
+                    if category_papers:
+                        edited_frames.append(paper_selection_editor(category_papers, f"evidence_select_{key_suffix}"))
+                    else:
+                        st.info(f"No {label.lower()} found yet.")
+
+            if st.button("Save selected sources from all sections", width="stretch"):
+                selected_ids = set()
+                for edited in edited_frames:
+                    selected_ids.update(edited.loc[edited["selected"] == True, "paper_id"].astype(str).tolist())
+                selected = []
+                for paper in papers:
+                    paper["selected"] = str(paper.get("paper_id")) in selected_ids
+                    if paper["selected"]:
+                        selected.append(paper)
+                st.session_state.paper_search["papers"] = papers
+                st.session_state.selected_papers = selected
+                st.session_state.downloaded_references = [
+                    item for item in st.session_state.get("downloaded_references", []) if str(item.get("paper_id")) in selected_ids
                 ]
-                if skipped_theses:
-                    st.caption(f"{len(skipped_theses)} thesis source(s) are used for RoL/reference mining only and are not shown as final citations.")
+                selected_summary = pd.DataFrame(
+                    [
+                        {"category": category, "selected": len([p for p in selected if p.get("category") == category])}
+                        for category in ["Research Article", "Review Paper", "Thesis"]
+                    ]
+                )
+                st.success(f"Saved {len(selected)} selected source(s) from separate evidence sections.")
+                st.dataframe(selected_summary, width="stretch", hide_index=True)
+
+            selected_papers = st.session_state.get("selected_papers", [])
+            if selected_papers:
+                st.divider()
+                st.subheader("Download and Read Selected Papers")
+                st.caption(
+                    "Use this before drafting so the discussion can use full-paper text, not only title or abstract."
+                )
+                dl_cols = st.columns(4)
+                dl_cols[0].metric("Selected", len(selected_papers))
+                dl_cols[1].metric("With PDF clue", len([p for p in selected_papers if p.get("pdf_url") or p.get("pdf_urls")]))
+                downloaded_refs = st.session_state.get("downloaded_references", [])
+                dl_cols[2].metric("Downloaded", len([p for p in downloaded_refs if p.get("download_success")]))
+                dl_cols[3].metric("Readable chars", sum(int(p.get("full_text_chars") or 0) for p in downloaded_refs))
+
+                if st.button("Download and read selected PDFs", type="primary", width="stretch"):
+                    with st.spinner("Finding open PDFs, downloading selected papers, and extracting full text..."):
+                        downloaded = download_and_read_selected_papers(
+                            selected_papers,
+                            serpapi_key=st.session_state.serpapi_key,
+                            core_key=st.session_state.core_key,
+                            semantic_key=st.session_state.semantic_key,
+                        )
+                    if st.session_state.gemini_key:
+                        context_text = current_context_text(inputs, extracted_files)
+                        with st.spinner("Google Gemini is reading papers, thesis literature reviews, and thesis references..."):
+                            downloaded = gemini_read_selected_papers(
+                                downloaded,
+                                context_text,
+                                st.session_state.gemini_key,
+                                st.session_state.gemini_model,
+                                current_style_profile(),
+                            )
+                            st.session_state.gemini_recommendations = summarize_gemini_reference_notes(
+                                downloaded,
+                                context_text,
+                                st.session_state.gemini_key,
+                                st.session_state.gemini_model,
+                                current_style_profile(),
+                            )
+                    by_id = {str(item.get("paper_id")): item for item in downloaded}
+                    st.session_state.selected_papers = [by_id.get(str(p.get("paper_id")), p) for p in selected_papers]
+                    st.session_state.downloaded_references = downloaded
+                    if st.session_state.paper_search.get("papers"):
+                        updated_papers = []
+                        for paper in st.session_state.paper_search["papers"]:
+                            updated_papers.append(by_id.get(str(paper.get("paper_id")), paper))
+                        st.session_state.paper_search["papers"] = updated_papers
+                    success_count = len([p for p in downloaded if p.get("download_success")])
+                    gemini_count = len([p for p in downloaded if p.get("gemini_note")])
+                    if st.session_state.gemini_key:
+                        st.success(f"Downloaded/read {success_count}/{len(downloaded)} PDF(s); Gemini read {gemini_count} selected source(s).")
+                    else:
+                        st.success(f"Downloaded/read {success_count}/{len(downloaded)} selected paper(s). Add a Gemini key to read and rank the sources.")
+
+                downloaded_refs = st.session_state.get("downloaded_references", [])
+                if downloaded_refs:
+                    download_rows = [
+                        {
+                            "status": "downloaded" if item.get("download_success") else "not found",
+                            "method": item.get("download_method", ""),
+                            "text_status": item.get("text_status", ""),
+                            "text_engine": item.get("text_extraction_method", ""),
+                            "chars": item.get("full_text_chars", 0),
+                            "size_mb": round((item.get("pdf_size_bytes", 0) or 0) / 1024 / 1024, 2),
+                            "category": item.get("category", ""),
+                            "gemini": item.get("gemini_read_status", ""),
+                            "title": item.get("title", ""),
+                            "pdf_path": item.get("pdf_path", ""),
+                        }
+                        for item in downloaded_refs
+                    ]
+                    st.dataframe(pd.DataFrame(download_rows), width="stretch", hide_index=True)
+
+                with st.expander("APA 7 reference preview", expanded=False):
+                    for paper in st.session_state.get("selected_papers", []):
+                        if include_in_final_references(paper):
+                            st.write(format_apa_reference(paper))
+                    skipped_theses = [
+                        paper for paper in st.session_state.get("selected_papers", [])
+                        if (paper.get("category") == "Thesis" and not include_in_final_references(paper))
+                    ]
+                    if skipped_theses:
+                        st.caption(f"{len(skipped_theses)} thesis source(s) are used for RoL/reference mining only and are not shown as final citations.")
 
 
 with tabs[3]:
