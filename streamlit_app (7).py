@@ -50,6 +50,7 @@ from logic import (
     table_to_plain_text,
     thesis_primary_study_search_queries,
     truncate_text,
+    writing_length_directive,
     write_results,
 )
 
@@ -189,6 +190,7 @@ def init_state() -> None:
         "reference_count": MIN_REFERENCE_COUNT,
         "per_query_limit": 10,
         "use_ai_scoring": True,
+        "writing_length_mode": "Concise style-preserving",
         "extracted_files": [],
         "active_style_name": "Anthony M. Shelton",
         "active_style_path": DEFAULT_SHELTON_STYLE_PATH,
@@ -270,6 +272,7 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         inputs.get("master_context", ""),
         analysis,
         result_text,
+        writing_length_directive(st.session_state.writing_length_mode),
     )
     tables = collect_tables(files)
     images = collect_images(files)
@@ -412,6 +415,19 @@ with st.sidebar:
     configure_api_key("Claude / Anthropic API key", "claude_key")
     st.session_state.claude_model = st.text_input("Claude discussion model", value=st.session_state.claude_model)
     st.caption("Claude is used for the Discussion framework and Discussion section when this key is available.")
+
+    st.divider()
+    st.subheader("Writing Length")
+    length_modes = ["Concise style-preserving", "Very concise style-preserving", "Standard detailed"]
+    current_length_mode = st.session_state.get("writing_length_mode", "Concise style-preserving")
+    if current_length_mode not in length_modes:
+        current_length_mode = "Concise style-preserving"
+    st.session_state.writing_length_mode = st.selectbox(
+        "Draft length mode",
+        length_modes,
+        index=length_modes.index(current_length_mode),
+    )
+    st.caption("Concise modes keep the loaded author style and analysis, but remove repetition and padding.")
 
     with st.expander("Streamlit secrets template"):
         st.code(API_SECRETS_TEMPLATE, language="toml")
@@ -1346,6 +1362,7 @@ with tabs[4]:
                         extracted_files=extracted_files,
                         styles=current_style_library(),
                         selected_papers=selected_papers,
+                        writing_length_mode=st.session_state.writing_length_mode,
                     )
                     st.session_state.draft = draft
                     st.session_state.docx_bytes = None
@@ -1360,6 +1377,8 @@ with tabs[4]:
             st.caption(draft["authors"])
         if draft.get("discussion_model"):
             st.caption(f"Discussion written with {draft.get('discussion_provider', 'LLM')}: {draft['discussion_model']}")
+        if draft.get("writing_length_mode"):
+            st.caption(f"Writing length: {draft.get('writing_length_mode')}")
         section_map = [
             ("Abstract", "abstract"),
             ("Introduction", "introduction"),

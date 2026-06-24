@@ -3317,6 +3317,7 @@ def section_prompt_common(
     master_context: str,
     analysis: dict[str, Any],
     result_text: str,
+    writing_length_directive: str = "",
 ) -> str:
     return f"""
 Paper title: {paper_title}
@@ -3333,7 +3334,43 @@ Master context:
 
 Result evidence:
 {truncate_text(result_text, 8000)}
+
+Writing length and density directive:
+{writing_length_directive or "Use normal publication length while preserving the selected author style."}
 """
+
+
+def writing_length_directive(mode: str = "Concise style-preserving") -> str:
+    mode_clean = (mode or "").strip().lower()
+    if "very" in mode_clean:
+        return """
+Use a very concise but style-preserving manuscript style.
+- Preserve the selected author's syntax, rhetorical movement, hedging, terminology, and evidence discipline.
+- Preserve all essential methods, result values, statistical meaning, citations, and interpretation logic.
+- Remove generic background, repeated phrases, redundant listing, and long transitional padding.
+- Introduction: keep only the strongest background, problem, gap, and objective paragraphs.
+- Materials and Methods: retain reproducible design, treatments, sampling, observations, and statistics, but compress procedural prose.
+- Results: keep table-wise SAU/ICAR logic and exact values, but report only decisive rankings, significant contrasts, pooled findings, and required checks.
+- Discussion: write one tight paragraph per major finding using finding -> explanation -> selected evidence -> implication.
+- Abstract and Conclusion: compact, direct, and publication-ready.
+Do not shorten by deleting essential scientific facts. If brevity conflicts with accuracy, accuracy wins.
+""".strip()
+    if "standard" in mode_clean or "detailed" in mode_clean:
+        return """
+Use standard full-length manuscript style.
+- Preserve the selected author's style contract and section-specific writing patterns.
+- Include complete methods, result interpretation, discussion comparisons, and evidence use without unnecessary filler.
+""".strip()
+    return """
+Use a concise, style-preserving manuscript style.
+- Preserve the selected author's style contract, tone, sentence movement, technical vocabulary, hedging, and rhetorical framing.
+- Keep all essential analysis: methods, result values, statistical meaning, discussion logic, citations, and implications.
+- Make the writing shorter by removing repetition, generic background, excessive transitions, and unnecessary explanation.
+- Prefer dense, polished paragraphs over long descriptive blocks.
+- Results must remain table-wise and SAU/ICAR-compliant, but avoid listing every middle treatment unless it is needed for interpretation.
+- Discussion must remain style-led and evidence-based, but focus each paragraph on one major finding and its strongest comparison/implication.
+- Do not omit supplied values, treatments, citations, or methodological details that are necessary for scientific accuracy.
+""".strip()
 
 
 def write_methodology(
@@ -3894,6 +3931,7 @@ def generate_full_draft(
     extracted_files: list[ExtractedFile],
     styles: dict[str, str],
     selected_papers: list[dict[str, Any]],
+    writing_length_mode: str = "Concise style-preserving",
 ) -> dict[str, Any]:
     result_text = combined_uploaded_text(extracted_files)
     analysis = analyze_research_context(
@@ -3906,7 +3944,17 @@ def generate_full_draft(
         result_text,
     )
     title = paper_title.strip() or analysis.get("generated_title") or "Research Paper Draft"
-    common = section_prompt_common(title, authors, affiliation, research_area, master_context, analysis, result_text)
+    length_directive = writing_length_directive(writing_length_mode)
+    common = section_prompt_common(
+        title,
+        authors,
+        affiliation,
+        research_area,
+        master_context,
+        analysis,
+        result_text,
+        length_directive,
+    )
 
     tables = collect_tables(extracted_files)
     images = collect_images(extracted_files)
@@ -3958,6 +4006,7 @@ def generate_full_draft(
         "discussion_model": (claude_model or DEFAULT_CLAUDE_MODEL) if claude_key else model,
         "conclusion": conclusion,
         "references": references,
+        "writing_length_mode": writing_length_mode,
         "analysis": analysis,
         "tables": tables,
         "images": images,
