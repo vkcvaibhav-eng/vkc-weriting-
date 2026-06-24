@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
@@ -49,6 +50,7 @@ def env_int(name: str, default: int) -> int:
 
 APP_ROOT = Path(__file__).resolve().parent
 STYLE_LIBRARY_DIR = APP_ROOT / "style_library"
+STYLE_CONTRACT_CACHE_DIR = APP_ROOT / "style_contract_cache"
 AUTHOR_STYLE_DIR = APP_ROOT / "styles"
 SAU_ICAR_RESULTS_PROMPT_PATH = APP_ROOT / "master_prompt.md"
 SAU_ICAR_REFERENCE_STYLE_GUIDE_PATH = APP_ROOT / "reference_style_guide.md"
@@ -258,6 +260,7 @@ class ExtractedFile:
 def ensure_app_dirs() -> None:
     STYLE_LIBRARY_DIR.mkdir(exist_ok=True)
     (STYLE_LIBRARY_DIR / "uploads").mkdir(exist_ok=True)
+    STYLE_CONTRACT_CACHE_DIR.mkdir(exist_ok=True)
     OUTPUT_DIR.mkdir(exist_ok=True)
     DOWNLOADED_REFERENCES_DIR.mkdir(exist_ok=True)
 
@@ -694,6 +697,206 @@ def infer_style_name_from_path(path_value: str) -> str:
     return stem or "Selected author"
 
 
+STYLE_PROFILE_CACHE_VERSION = "2026-06-25-sectionwise-v1"
+
+
+STYLE_SECTION_ALIASES = {
+    "app_ready": {"app-ready consolidated contract", "app ready consolidated contract"},
+    "overall": {"overall author style", "overall style"},
+    "abstract": {"abstract style"},
+    "introduction": {"introduction style"},
+    "methodology": {"materials and methods style", "methodology style", "materials & methods style"},
+    "results": {"results style"},
+    "discussion": {"discussion style"},
+    "conclusion": {"conclusion style"},
+    "references": {"reference and bibliography style", "reference/bibliography style", "references style", "bibliography style"},
+    "phrase_bank": {"phrase bank"},
+    "do_not_use": {"do-not-use rules", "do not use rules"},
+    "compression": {"style compression rules", "compression rules"},
+    "checklist": {"final editor checklist", "editor checklist"},
+}
+
+
+def normalize_style_heading(value: str) -> str:
+    clean = re.sub(r"^\d+\.\s*", "", str(value or "").strip().lower())
+    clean = clean.replace("&", "and")
+    clean = re.sub(r"[\s\-_]+", " ", clean)
+    return clean.strip(" :")
+
+
+def extract_front_style_sections(style_text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for raw_line in re.split(r"\n+", style_text or ""):
+        line = raw_line.strip()
+        if not line:
+            continue
+        normalized = normalize_style_heading(line)
+        if normalized.startswith("source report"):
+            break
+        matched = ""
+        for key, aliases in STYLE_SECTION_ALIASES.items():
+            if normalized in aliases:
+                matched = key
+                break
+        if matched:
+            current = matched
+            sections.setdefault(current, [])
+            continue
+        if current:
+            sections.setdefault(current, []).append(line)
+    return {key: "\n".join(lines).strip() for key, lines in sections.items() if "\n".join(lines).strip()}
+
+
+def list_from_section(section_text: str, limit: int = 20) -> list[str]:
+    items = []
+    for raw_line in re.split(r"\n+", section_text or ""):
+        line = re.sub(r"^\s*[-*•\d.)]+\s*", "", raw_line.strip())
+        if line:
+            items.append(truncate_text(line, 700))
+    return items[:limit]
+
+
+def build_sectionwise_style_profile(style_text: str, author_name: str) -> dict[str, Any] | None:
+    sections = extract_front_style_sections(style_text)
+    required = {"overall", "abstract", "introduction", "methodology", "results", "discussion"}
+    if len(required.intersection(sections)) < 4:
+        return None
+    section_rules = {
+        "abstract": truncate_text(sections.get("abstract", ""), 2200),
+        "introduction": truncate_text(sections.get("introduction", ""), 3000),
+        "methodology": truncate_text(sections.get("methodology", ""), 3000),
+        "results": truncate_text(sections.get("results", ""), 3200),
+        "discussion": truncate_text(sections.get("discussion", ""), 3800),
+        "conclusion": truncate_text(sections.get("conclusion", ""), 1800),
+    }
+    citation_rules = list_from_section(sections.get("references", ""), limit=12)
+    compression_rules = list_from_section(sections.get("compression", ""), limit=12)
+    editor_checklist = list_from_section(sections.get("checklist", ""), limit=14)
+    phrases_to_use = list_from_section(sections.get("phrase_bank", ""), limit=20)
+    phrases_to_avoid = list_from_section(sections.get("do_not_use", ""), limit=16)
+    planning_profile = "\n\n".join(
+        [
+            f"Author: {author_name}",
+            "Overall style:\n" + truncate_text(sections.get("overall", ""), 2000),
+            "Introduction evidence preference:\n" + section_rules["introduction"],
+            "Methodology evidence preference:\n" + section_rules["methodology"],
+            "Discussion evidence preference:\n" + section_rules["discussion"],
+            "Reference/citation behavior:\n" + truncate_text(sections.get("references", ""), 1800),
+            "Do-not-use rules:\n" + truncate_text(sections.get("do_not_use", ""), 1500),
+            "Style compression rules:\n" + truncate_text(sections.get("compression", ""), 1600),
+        ]
+    )
+    profile = {
+        "author": author_name,
+        "source_type": "app_ready_sectionwise_style_contract",
+        "profile_cache_version": STYLE_PROFILE_CACHE_VERSION,
+        "overall_style": truncate_text(sections.get("overall", ""), 2500),
+        "section_rules": section_rules,
+        "signature_moves": list_from_section(sections.get("overall", ""), limit=10),
+        "sentence_patterns": list_from_section(sections.get("discussion", ""), limit=8),
+        "phrases_to_use": phrases_to_use,
+        "phrases_to_avoid": phrases_to_avoid,
+        "citation_style_rules": citation_rules,
+        "style_compression_rules": compression_rules,
+        "editor_checklist": editor_checklist,
+        "planning_profile": truncate_text(planning_profile, 12000),
+        "raw_report_excerpt": truncate_text(
+            "\n\n".join(
+                [
+                    sections.get("app_ready", ""),
+                    sections.get("overall", ""),
+                    sections.get("abstract", ""),
+                    sections.get("introduction", ""),
+                    sections.get("methodology", ""),
+                    sections.get("results", ""),
+                    sections.get("discussion", ""),
+                    sections.get("references", ""),
+                    sections.get("phrase_bank", ""),
+                    sections.get("do_not_use", ""),
+                    sections.get("compression", ""),
+                    sections.get("checklist", ""),
+                ]
+            ),
+            12000,
+        ),
+        "full_style_characters": len(style_text or ""),
+        "compressed_planning_characters": len(truncate_text(planning_profile, 12000)),
+    }
+    profile["compressed_profile_characters"] = len(json.dumps(profile, ensure_ascii=True))
+    return profile
+
+
+def style_cache_key(path_value: str, author_name: str, style_text: str) -> str:
+    digest = hashlib.sha256(
+        (
+            STYLE_PROFILE_CACHE_VERSION
+            + "\n"
+            + author_name
+            + "\n"
+            + str(Path(path_value).name)
+            + "\n"
+            + hashlib.sha256((style_text or "").encode("utf-8", errors="ignore")).hexdigest()
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"{safe_slug(author_name)}__{digest}.json"
+
+
+def read_cached_style_profile(path_value: str, author_name: str, style_text: str) -> dict[str, Any] | None:
+    ensure_app_dirs()
+    cache_path = STYLE_CONTRACT_CACHE_DIR / style_cache_key(path_value, author_name, style_text)
+    if not cache_path.exists():
+        return None
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        if cached.get("profile_cache_version") == STYLE_PROFILE_CACHE_VERSION:
+            cached["cache_path"] = str(cache_path)
+            cached["cache_status"] = "hit"
+            return cached
+    except Exception:
+        return None
+    return None
+
+
+def write_cached_style_profile(path_value: str, author_name: str, style_text: str, profile: dict[str, Any]) -> dict[str, Any]:
+    ensure_app_dirs()
+    cache_path = STYLE_CONTRACT_CACHE_DIR / style_cache_key(path_value, author_name, style_text)
+    payload = dict(profile)
+    payload["profile_cache_version"] = STYLE_PROFILE_CACHE_VERSION
+    payload["cache_path"] = str(cache_path)
+    payload["cache_status"] = "written"
+    cache_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    return payload
+
+
+def compact_style_profile_for_api(style_profile: dict[str, Any] | None, purpose: str = "planning") -> dict[str, Any]:
+    profile = style_profile or {}
+    section_rules = profile.get("section_rules") or {}
+    if purpose == "planning":
+        kept_sections = {
+            "introduction": section_rules.get("introduction", ""),
+            "methodology": section_rules.get("methodology", ""),
+            "discussion": section_rules.get("discussion", ""),
+            "results": section_rules.get("results", ""),
+        }
+    else:
+        kept_sections = section_rules
+    compact = {
+        "author": profile.get("author", ""),
+        "source_type": profile.get("source_type", ""),
+        "overall_style": truncate_text(profile.get("overall_style", ""), 800),
+        "section_rules": {key: truncate_text(str(value), 650) for key, value in kept_sections.items()},
+        "signature_moves": profile.get("signature_moves", [])[:5],
+        "phrases_to_use": profile.get("phrases_to_use", [])[:6],
+        "phrases_to_avoid": profile.get("phrases_to_avoid", [])[:6],
+        "citation_style_rules": profile.get("citation_style_rules", [])[:5],
+        "style_compression_rules": profile.get("style_compression_rules", [])[:5],
+        "editor_checklist": profile.get("editor_checklist", [])[:5],
+        "planning_profile": truncate_text(profile.get("planning_profile", ""), 2200),
+    }
+    return compact
+
+
 def fallback_style_profile(style_text: str, author_name: str = "Selected author") -> dict[str, Any]:
     return {
         "author": author_name,
@@ -738,6 +941,9 @@ def analyze_writing_style_report(
     style_text: str,
     author_name: str = "Anthony M. Shelton",
 ) -> dict[str, Any]:
+    sectionwise_profile = build_sectionwise_style_profile(style_text, author_name)
+    if sectionwise_profile:
+        return sectionwise_profile
     fallback = fallback_style_profile(style_text, author_name)
     if not api_key:
         return fallback
@@ -775,6 +981,8 @@ editor_checklist must be a list of concrete checks an editor should apply after 
 
 def build_writing_style_library(style_text: str, style_profile: dict[str, Any], author_name: str = "Selected author") -> dict[str, str]:
     section_rules = style_profile.get("section_rules") or {}
+    planning_profile = style_profile.get("planning_profile") or ""
+    raw_excerpt_limit = 4500 if planning_profile else 9000
     common = f"""
 STRICT SELECTED AUTHOR STYLE CONTRACT
 Author/style report: {style_profile.get("author", author_name)}
@@ -784,9 +992,13 @@ Sentence patterns: {json.dumps(style_profile.get("sentence_patterns", []), ensur
 Citation rules: {json.dumps(style_profile.get("citation_style_rules", []), ensure_ascii=True)}
 Use phrases: {json.dumps(style_profile.get("phrases_to_use", []), ensure_ascii=True)}
 Avoid: {json.dumps(style_profile.get("phrases_to_avoid", []), ensure_ascii=True)}
+Style compression rules: {json.dumps(style_profile.get("style_compression_rules", []), ensure_ascii=True)}
 
-Attached style report excerpt:
-{truncate_text(style_text, 18000)}
+Compressed section-wise planning profile:
+{truncate_text(planning_profile, 9000) if planning_profile else ""}
+
+Attached style report excerpt, only for backup:
+{truncate_text(style_profile.get("raw_report_excerpt") or style_text, raw_excerpt_limit)}
 """
     return {
         "style_contract": common,
@@ -813,12 +1025,21 @@ def load_writing_style_contract(
 ) -> dict[str, Any]:
     author_name = author_name or infer_style_name_from_path(path_value)
     style_text = extract_style_text_from_path(path_value)
-    profile = analyze_writing_style_report(api_key, model, style_text, author_name)
+    cached_profile = read_cached_style_profile(path_value, author_name, style_text)
+    if cached_profile:
+        profile = cached_profile
+    else:
+        profile = analyze_writing_style_report(api_key, model, style_text, author_name)
+        profile = write_cached_style_profile(path_value, author_name, style_text, profile)
     styles = build_writing_style_library(style_text, profile, author_name)
     return {
         "path": path_value,
         "author": author_name,
         "characters": len(style_text),
+        "style_cache_status": profile.get("cache_status", ""),
+        "style_cache_path": profile.get("cache_path", ""),
+        "compressed_profile_characters": profile.get("compressed_profile_characters", 0),
+        "compressed_planning_characters": profile.get("compressed_planning_characters", 0),
         "text": style_text,
         "profile": profile,
         "styles": styles,
@@ -1123,7 +1344,7 @@ Discussion framework already planned from title, methodology, and Results:
 {json.dumps(discussion_framework or {}, ensure_ascii=True)[:18000]}
 
 Selected author writing-style contract:
-{json.dumps(style_profile or {}, ensure_ascii=True)[:18000]}
+{json.dumps(compact_style_profile_for_api(style_profile, "planning"), ensure_ascii=True)[:12000]}
 
 Create a Discussion-first evidence plan.
 
@@ -3203,7 +3424,7 @@ Thesis/review references or bibliography section, if detected:
 {truncate_text(references_section, 14000)}
 
 Selected author writing-style contract to keep in view while reading:
-{json.dumps(style_profile, ensure_ascii=True)[:18000]}
+{json.dumps(compact_style_profile_for_api(style_profile, "reading"), ensure_ascii=True)[:12000]}
 
 Return only a JSON object with these keys:
 citation, title, category, evidence_source, overall_relevance, why_relevant,
@@ -3368,7 +3589,7 @@ Research context:
 {truncate_text(context_text, 7000)}
 
 Selected author writing-style contract:
-{json.dumps(style_profile or {}, ensure_ascii=True)[:18000]}
+{json.dumps(compact_style_profile_for_api(style_profile, "planning"), ensure_ascii=True)[:12000]}
 
 Reading notes:
 {json.dumps(compact_notes, ensure_ascii=True)[:50000]}
@@ -3435,7 +3656,7 @@ Research context and supplied data:
 {truncate_text(context_text, 9000)}
 
 Selected author style contract:
-{json.dumps(style_profile or {}, ensure_ascii=True)[:20000]}
+{json.dumps(compact_style_profile_for_api(style_profile, "planning"), ensure_ascii=True)[:12000]}
 
 Current selected evidence:
 {json.dumps(compact_refs, ensure_ascii=True)[:40000]}
@@ -3563,7 +3784,7 @@ Audit this research-paper draft as an OpenAI scientific editor. The draft must s
 the selected author style contract and must not invent unsupported facts or citations.
 
 Selected author style contract:
-{json.dumps(style_profile or {}, ensure_ascii=True)[:22000]}
+{json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
 
 Draft:
 {truncate_text(draft_plain_text(draft), 30000)}
@@ -3604,7 +3825,7 @@ Perform the final Gemini editor check on this draft. Check strict selected autho
 evidence use, citation safety, section order, and whether any claim needs more data.
 
 Selected author style contract:
-{json.dumps(style_profile or {}, ensure_ascii=True)[:22000]}
+{json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
 
 Draft:
 {truncate_text(draft_plain_text(draft), 30000)}
@@ -3640,7 +3861,7 @@ Do not add new citations, authors, years, numbers, treatments, methods, or findi
 Make the wording stricter to the selected author style contract.
 
 Selected author style contract:
-{json.dumps(style_profile or {}, ensure_ascii=True)[:22000]}
+{json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
 
 OpenAI editor audit:
 {json.dumps(openai_audit or {}, ensure_ascii=True)[:12000]}

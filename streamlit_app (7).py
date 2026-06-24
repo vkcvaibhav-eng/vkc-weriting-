@@ -709,10 +709,12 @@ with tabs[1]:
     if not contract:
         st.info("Load a style report before Gemini reading and drafting for strict style control.")
     else:
-        cols = st.columns(3)
+        cols = st.columns(5)
         cols[0].metric("Style characters", contract.get("characters", 0))
         cols[1].metric("Author style", profile.get("author", st.session_state.active_style_name))
         cols[2].metric("Style roles", len(current_style_library()))
+        cols[3].metric("Planning chars", contract.get("compressed_planning_characters", 0))
+        cols[4].metric("Cache", contract.get("style_cache_status", "") or "new")
 
         st.write("Style summary")
         st.write(profile.get("overall_style", ""))
