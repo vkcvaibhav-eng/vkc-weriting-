@@ -3808,7 +3808,9 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
                 lead.get("objective_or_topic")
                 or lead.get("matched_objective_or_result")
                 or lead.get("matched_user_result_or_discussion_need")
+                or lead.get("matched_user_objective_or_result")
                 or lead.get("discussion_topic_or_finding")
+                or lead.get("review_section_heading_or_topic")
                 or lead.get("rol_heading_or_topic")
                 or lead.get("topic")
                 or lead.get("why_it_matches")
@@ -3820,7 +3822,9 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
                 or lead.get("concise_rol_content")
                 or lead.get("full_block_paraphrase")
                 or lead.get("full_discussion_paraphrase")
+                or lead.get("full_section_paraphrase")
                 or lead.get("evidence_context_in_discussion")
+                or lead.get("evidence_context_in_review_section")
                 or lead.get("why_useful_for_discussion")
             )
             bibliography_entry = lead.get("bibliography_entry_if_found") or lead.get("bibliography_entry")
@@ -3996,6 +4000,17 @@ def gemini_mine_pdf_images_for_source_text(
   when visible. Keep reference entries as searchable original-reference leads.
 - Include only short exact excerpts for verification; do not reproduce long Discussion text.
 """.strip()
+    elif "review" in category_lower:
+        mining_task = """
+- For review papers, find the visible review section/subsection most related to the current crop/host, pest/problem,
+  objective, treatment/factor, mechanism, or result direction.
+- Read the whole related section before summarizing it. Do not stop at only one matching sentence.
+- Extract the complete section evidence flow in paraphrase: section topic -> cited studies -> mechanisms/patterns ->
+  agreements/contrasts -> implications or knowledge gaps.
+- Capture every visible in-text citation used in that related review section and match it to bibliography/reference
+  entries when visible. Keep reference entries as searchable original-reference leads.
+- Include only short exact excerpts for verification; do not reproduce long review-paper text.
+""".strip()
     else:
         mining_task = """
 - If these pages contain review synthesis, references, bibliography, or literature cited, extract original author-year study leads,
@@ -4094,6 +4109,14 @@ def extract_research_discussion_section(text: str, limit: int = 30000) -> str:
     )
 
 
+def extract_review_body_before_references(text: str, limit: int = 30000) -> str:
+    if not text:
+        return ""
+    matches = list(re.finditer(r"\b(references|bibliography|literature cited)\b", text, flags=re.IGNORECASE))
+    end = matches[-1].start() if matches else len(text)
+    return truncate_text(text[:end], limit)
+
+
 def extract_references_section(text: str, limit: int = 14000) -> str:
     if not text:
         return ""
@@ -4138,6 +4161,12 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "thesis_citation_policy": "do_not_cite_thesis_directly" if category == "Thesis" else "",
         "cite_thesis_directly": False,
         "review_synthesis_insights": [],
+        "review_related_section_notes": "",
+        "review_related_section_full_coverage": [],
+        "review_section_citation_map": [],
+        "review_related_reference_leads": [],
+        "review_related_search_queries": [],
+        "review_related_verification_excerpts": [],
         "review_primary_studies": [],
         "review_reference_leads": [],
         "review_primary_study_leads": [],
@@ -4205,6 +4234,7 @@ def gemini_read_reference(
     thesis_introduction = extract_thesis_introduction_section(full_text) if category == "Thesis" else ""
     literature_review = extract_literature_review_section(full_text) if category == "Thesis" and evidence_section != "Introduction" else ""
     research_discussion = extract_research_discussion_section(full_text) if category == "Research Article" else ""
+    review_body = extract_review_body_before_references(full_text) if category == "Review Paper" else ""
     references_section = extract_references_section(full_text) if category in {"Thesis", "Review Paper", "Research Article"} else ""
     readable_text = full_text or abstract
     if category == "Thesis" and evidence_section == "Introduction":
@@ -4282,6 +4312,32 @@ For research articles:
 - research_discussion_verification_excerpts may include short exact excerpts only for verification. Keep each excerpt
   under 120 words and do not use those exact words in manuscript drafting.
 """.strip()
+    review_paper_reading_rule = """
+For review papers:
+- Treat the review as a synthesis source and a bibliography-mining map, not as primary experimental evidence.
+- First identify the section/subsection most related to our crop/host, pest/problem, objective, treatment/factor,
+  mechanism, result direction, or discussion need.
+- Read the whole matched review section/subsection before judging relevance. Do not use only one matching sentence.
+- review_related_section_notes must summarize why the matched section matters for our paper.
+- review_related_section_full_coverage must be an array of objects with review_section_heading_or_topic,
+  matched_user_objective_or_result, section_location_if_available, full_section_read_status,
+  estimated_section_word_count, full_section_paraphrase, mechanisms_or_synthesis_points,
+  agreements_or_contrasts, all_in_text_citations_in_section, knowledge_gaps_or_implications,
+  and how_to_use_in_our_discussion.
+- review_section_citation_map must map each in-text citation from the matched review section to
+  bibliography_entry_if_found, exact_title_if_found, evidence_context_in_review_section, support_or_contrast,
+  search_query_to_find_cited_paper, and confidence.
+- review_related_reference_leads must list the full bibliography entries cited inside the matched review section.
+- review_related_search_queries must list precise queries for finding those cited original papers again.
+- review_related_verification_excerpts may include short exact excerpts only for verification. Keep each excerpt under
+  120 words and do not use those exact words in manuscript drafting.
+- review_synthesis_insights should still capture broad synthesis points that can be cited to the review itself.
+- review_primary_studies, review_reference_leads, and review_primary_study_leads should prioritize original studies
+  cited inside the matched related section and bibliography.
+- review_citation_policy must be "cite_review_for_broad_synthesis_only_and_cite_original_primary_sources_for_specific_findings".
+- cite_review_directly can be true for broad background/synthesis statements, but specific methods/results/comparisons should
+  cite original primary papers after they are found and selected.
+""".strip()
 
     prompt = f"""
 You are reading one scholarly source for a research-paper writing app.
@@ -4305,13 +4361,16 @@ Full text or available source text:
 Research-article Discussion or Results and Discussion section, if detected:
 {truncate_text(research_discussion, 30000)}
 
+Review-paper body before references, if detected:
+{truncate_text(review_body, 30000)}
+
 Thesis introduction/background section, if detected:
 {truncate_text(thesis_introduction, 16000)}
 
 Thesis review-of-literature section, if detected:
 {truncate_text(literature_review, 16000)}
 
-Thesis/review references or bibliography section, if detected:
+Source references or bibliography section, if detected:
 {truncate_text(references_section, 14000)}
 
 Selected author writing-style contract to keep in view while reading:
@@ -4330,23 +4389,16 @@ objective_matched_rol_verbatim_excerpts,
 objective_matched_rol_bibliography, rol_citation_to_bibliography_map,
 objective_matched_rol_search_queries, rol_primary_studies, primary_study_leads,
 thesis_citation_policy, cite_thesis_directly, review_synthesis_insights,
+review_related_section_notes, review_related_section_full_coverage,
+review_section_citation_map, review_related_reference_leads,
+review_related_search_queries, review_related_verification_excerpts,
 review_primary_studies, review_reference_leads, review_primary_study_leads,
 review_citation_policy, cite_review_directly, usable_citation_sentences,
 shelton_style_use, selected_style_use, missing_evidence_or_data.
 
 {thesis_reading_rule}
 {research_article_reading_rule}
-For review papers:
-- Treat the review as a synthesis source and a bibliography-mining map, not as primary experimental evidence.
-- Extract discussion insights that match our objectives/results into review_synthesis_insights. Each insight should include
-  theme, insight_for_discussion, relation_to_our_objective_or_result, caution_or_boundary, and supported_original_reference_leads.
-- Mine the review bibliography/literature cited for the original primary studies behind those insights.
-- review_primary_studies must be an array of objects with author_year, objective_or_topic, crop_pest_context,
-  method_or_treatment, key_result, why_it_matches, bibliography_entry_if_found, and search_query_to_find_primary_paper.
-- review_reference_leads and review_primary_study_leads must list concise original-study bibliography entries or search leads.
-- review_citation_policy must be "cite_review_for_broad_synthesis_only_and_cite_original_primary_sources_for_specific_findings".
-- cite_review_directly can be true for broad background/synthesis statements, but specific methods/results/comparisons should
-  cite original primary papers after they are found and selected.
+{review_paper_reading_rule}
 For source-mining fields that do not apply to the current category, keep them empty.
 In shelton_style_use and selected_style_use, explain exactly how this evidence should be used in the selected author-style introduction,
 methods justification, results support, or discussion comparison.
@@ -4400,6 +4452,8 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
     research_discussion_maps = []
     review_leads = []
     review_insights = []
+    review_section_coverage = []
+    review_section_maps = []
     for paper in papers:
         note = paper.get("gemini_note") or {}
         category = paper.get("category") or infer_paper_category(paper)
@@ -4418,6 +4472,10 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
             research_discussion_maps.extend(note.get("research_discussion_citation_map") or [])
         elif category == "Review Paper":
             review_insights.extend(note.get("review_synthesis_insights") or [])
+            review_section_coverage.extend(note.get("review_related_section_full_coverage") or [])
+            review_leads.extend(note.get("review_related_reference_leads") or [])
+            review_leads.extend(note.get("review_related_search_queries") or [])
+            review_section_maps.extend(note.get("review_section_citation_map") or [])
             review_leads.extend(note.get("review_reference_leads") or [])
             review_leads.extend(note.get("review_primary_study_leads") or [])
             review_leads.extend(note.get("most_useful_references") or [])
@@ -4429,6 +4487,9 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
         "research_discussion_reference_leads": research_discussion_leads[:30],
         "research_discussion_citation_map": research_discussion_maps[:30],
         "review_discussion_insights": review_insights[:20],
+        "review_related_section_coverage": review_section_coverage[:20],
+        "review_section_citation_map": review_section_maps[:30],
+        "review_related_reference_leads": review_leads[:20],
         "review_reference_leads": review_leads[:20],
         "review_primary_study_leads": review_leads[:20],
         "review_paper_to_use": next((item for item in best if item.get("category") == "Review Paper"), {}),
@@ -4512,12 +4573,16 @@ Critical research-article Discussion rule:
   are verification-only.
 
 Critical review-paper rule:
-- Use review papers to mine broad discussion insights related to our objectives and results.
-- Put those insights in review_discussion_insights so they can guide the Discussion.
+- Use review papers to mine the most related section/subsection first, not only the whole-paper summary.
+- Use review_related_section_full_coverage to understand the complete related-section logic.
+- Use review_section_citation_map and review_related_reference_leads to identify the original references cited inside
+  that matched review section.
+- Put broad synthesis points in review_discussion_insights so they can guide the Discussion.
 - Do not treat review summaries as primary evidence for specific experimental comparisons.
-- Extract the original studies from review bibliographies/literature cited and put them in
-  review_primary_study_leads, review_reference_leads, and suggested_search_queries so the original papers can be found,
-  selected, read, and cited.
+- Extract the original studies from the matched review section and bibliography/literature cited, then put them in
+  review_primary_study_leads, review_reference_leads, review_related_reference_leads, and suggested_search_queries so
+  the original papers can be found, selected, read, and cited.
+- review_related_verification_excerpts are verification-only. Do not reuse exact review-paper wording in drafted text.
 - Recommend direct review citation only for broad synthesis/background statements, not for specific primary findings.
 
 Research context:
@@ -4537,6 +4602,9 @@ thesis_reference_leads: array of bibliography entries or source leads found insi
 thesis_primary_study_leads: array of primary author-year study leads extracted from thesis Introduction/RoL/bibliography;
 objective_matched_rol_leads: array of objects with matched_objective_or_result, cited_author_years, bibliography_entries, search_queries, full_block_paraphrase, why_useful_for_discussion;
 review_discussion_insights: array of review-derived synthesis insights useful for the Discussion;
+review_related_section_coverage: array of objects with review_section_heading_or_topic, matched_user_objective_or_result, full_section_paraphrase, all_in_text_citations_in_section, how_to_use_in_our_discussion;
+review_section_citation_map: array of objects mapping in-text citations from the related review section to bibliography entries and search queries;
+review_related_reference_leads: array of bibliography entries or source leads cited inside the matched review section;
 review_reference_leads: array of bibliography entries or source leads found inside review papers;
 review_primary_study_leads: array of primary author-year study leads extracted from review-paper references;
 review_paper_to_use: object with citation, title, why_to_use;
@@ -4962,6 +5030,14 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
                     "rol_primary_studies": gemini_note.get("rol_primary_studies", [])[:10],
                     "primary_study_leads": gemini_note.get("primary_study_leads", [])[:10],
                     "review_synthesis_insights": gemini_note.get("review_synthesis_insights", [])[:8],
+                    "review_related_section_notes": truncate_text(gemini_note.get("review_related_section_notes", ""), 900),
+                    "review_related_section_full_coverage": gemini_note.get("review_related_section_full_coverage", [])[:8],
+                    "review_section_citation_map": gemini_note.get("review_section_citation_map", [])[:10],
+                    "review_related_reference_leads": gemini_note.get("review_related_reference_leads", [])[:10],
+                    "review_related_search_queries": gemini_note.get("review_related_search_queries", [])[:10],
+                    "review_related_verification_excerpt_count": len(
+                        gemini_note.get("review_related_verification_excerpts", []) or []
+                    ),
                     "review_primary_studies": gemini_note.get("review_primary_studies", [])[:10],
                     "review_reference_leads": gemini_note.get("review_reference_leads", [])[:10],
                     "review_primary_study_leads": gemini_note.get("review_primary_study_leads", [])[:10],
@@ -5502,6 +5578,9 @@ Rules:
   evidence logic in the selected style.
 - Use review-paper synthesis insights to frame the discussion, but do not use a review as the only support for a
   specific experimental result or method comparison when the original primary paper lead has not been selected/read.
+- For selected review papers, use review_related_section_full_coverage and review_section_citation_map to understand
+  the most related review section and its citation chain. Cite the review only for broad synthesis; cite selected
+  original papers for specific study evidence. Do not copy review_related_verification_excerpts or review-paper wording.
 - For selected research articles, use research_discussion_full_coverage to understand how their Discussion explains
   comparable findings, and use research_discussion_citation_map to identify cited original references. Do not copy
   research_discussion_verification_excerpts or the article's Discussion wording.

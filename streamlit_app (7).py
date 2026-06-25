@@ -1852,13 +1852,31 @@ with tabs[3]:
                     for insight in review_insights[:20]:
                         st.write(insight)
 
-            review_reference_leads = recommendations.get("review_reference_leads") or []
+            review_section_coverage = recommendations.get("review_related_section_coverage") or []
+            if review_section_coverage:
+                with st.expander("Most related review-paper section coverage", expanded=True):
+                    for coverage in review_section_coverage[:20]:
+                        st.write(coverage)
+
+            review_section_map = recommendations.get("review_section_citation_map") or []
+            if review_section_map:
+                with st.expander("Review-section citation to bibliography map", expanded=True):
+                    for mapped_reference in review_section_map[:30]:
+                        st.write(mapped_reference)
+
+            review_related_leads = recommendations.get("review_related_reference_leads") or []
+            if review_related_leads:
+                with st.expander("Original references cited inside matched review sections", expanded=True):
+                    for lead in review_related_leads[:30]:
+                        st.write(lead)
+
+            review_reference_leads = (recommendations.get("review_reference_leads") or []) + review_related_leads
             if review_reference_leads:
                 with st.expander("Original references found inside review papers", expanded=True):
                     for lead in review_reference_leads[:30]:
                         st.write(lead)
 
-            review_primary_leads = recommendations.get("review_primary_study_leads") or []
+            review_primary_leads = (recommendations.get("review_primary_study_leads") or []) + review_related_leads + review_section_map
             if review_primary_leads:
                 with st.expander("Primary-study leads extracted from review bibliographies", expanded=True):
                     for lead in review_primary_leads[:30]:
@@ -2115,6 +2133,34 @@ with tabs[3]:
                     if note.get("research_discussion_verification_excerpts"):
                         st.markdown("**Short exact Discussion excerpts for verification only**")
                         for excerpt in note.get("research_discussion_verification_excerpts", [])[:6]:
+                            st.write(excerpt)
+
+        review_section_notes = [
+            (paper, paper.get("gemini_note") or {})
+            for paper in st.session_state.get("selected_papers", [])
+            if paper.get("category") == "Review Paper" and paper.get("gemini_note")
+        ]
+        if review_section_notes:
+            with st.expander("Review-paper related-section mining notes", expanded=False):
+                for paper, note in review_section_notes:
+                    st.markdown(f"**{citation_key(paper)} {paper.get('title', '')}**")
+                    if note.get("review_related_section_notes"):
+                        st.write(note["review_related_section_notes"])
+                    if note.get("review_related_section_full_coverage"):
+                        st.markdown("**Most related review section coverage**")
+                        for coverage in note.get("review_related_section_full_coverage", [])[:8]:
+                            st.write(coverage)
+                    if note.get("review_section_citation_map"):
+                        st.markdown("**Review-section citation to bibliography map**")
+                        for mapped_reference in note.get("review_section_citation_map", [])[:12]:
+                            st.write(mapped_reference)
+                    if note.get("review_related_reference_leads"):
+                        st.markdown("**References cited inside matched review section**")
+                        for reference in note.get("review_related_reference_leads", [])[:12]:
+                            st.write(reference)
+                    if note.get("review_related_verification_excerpts"):
+                        st.markdown("**Short exact review-section excerpts for verification only**")
+                        for excerpt in note.get("review_related_verification_excerpts", [])[:6]:
                             st.write(excerpt)
 
         thesis_notes = [
