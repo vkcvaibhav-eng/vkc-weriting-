@@ -44,6 +44,7 @@ from logic import (
     revise_draft_with_style_audits,
     review_primary_study_search_queries,
     search_and_rank_papers,
+    section_word_budget,
     section_prompt_common,
     suggest_style_aligned_followup_needs,
     summarize_gemini_reference_notes,
@@ -191,6 +192,7 @@ def init_state() -> None:
         "per_query_limit": 10,
         "use_ai_scoring": True,
         "writing_length_mode": "Concise style-preserving",
+        "target_word_count": 3750,
         "extracted_files": [],
         "active_style_name": "Anthony M. Shelton",
         "active_style_path": DEFAULT_SHELTON_STYLE_PATH,
@@ -249,6 +251,25 @@ def current_input_values() -> dict:
     }
 
 
+def estimate_words(value) -> int:
+    return len(str(value or "").split())
+
+
+def draft_section_word_counts(draft: dict) -> dict[str, int]:
+    return {
+        "abstract": estimate_words(draft.get("abstract", "")),
+        "introduction": estimate_words(draft.get("introduction", "")),
+        "materials_and_methods": estimate_words(draft.get("methodology", "")),
+        "results": estimate_words(draft.get("results", "")),
+        "discussion": estimate_words(draft.get("discussion", "")),
+        "conclusion": estimate_words(draft.get("conclusion", "")),
+    }
+
+
+def draft_body_word_count(draft: dict) -> int:
+    return sum(draft_section_word_counts(draft).values())
+
+
 def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]:
     result_text = combined_uploaded_text(files)
     context_text = inputs["master_context"] + "\n" + inputs["raw_methodology"]
@@ -272,7 +293,7 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         inputs.get("master_context", ""),
         analysis,
         result_text,
-        writing_length_directive(st.session_state.writing_length_mode),
+        writing_length_directive(st.session_state.writing_length_mode, st.session_state.target_word_count),
     )
     tables = collect_tables(files)
     images = collect_images(files)
@@ -885,6 +906,29 @@ with st.sidebar:
         length_modes,
         index=length_modes.index(current_length_mode),
     )
+    st.session_state.target_word_count = st.slider(
+        "Research article target words",
+        min_value=2500,
+        max_value=6000,
+        value=int(st.session_state.get("target_word_count", 3750)),
+        step=250,
+    )
+    word_budget = section_word_budget(st.session_state.target_word_count)
+    st.caption(
+        "Default 3500-4000 words is suitable for a compact research article. "
+        "Target excludes references, tables, captions, and appendices."
+    )
+    with st.expander("Section word budget", expanded=False):
+        st.write(
+            {
+                "Abstract": word_budget["abstract"],
+                "Introduction": word_budget["introduction"],
+                "Materials and Methods": word_budget["materials_and_methods"],
+                "Results": word_budget["results"],
+                "Discussion": word_budget["discussion"],
+                "Conclusion": word_budget["conclusion"],
+            }
+        )
     st.caption("Concise modes keep the loaded author style and analysis, but remove repetition and padding.")
 
     with st.expander("Streamlit secrets template"):
@@ -2013,6 +2057,7 @@ with tabs[4]:
                         styles=current_style_library(),
                         selected_papers=selected_papers,
                         writing_length_mode=st.session_state.writing_length_mode,
+                        target_word_count=st.session_state.target_word_count,
                     )
                     st.session_state.draft = draft
                     st.session_state.docx_bytes = None
@@ -2029,6 +2074,30 @@ with tabs[4]:
             st.caption(f"Discussion written with {draft.get('discussion_provider', 'LLM')}: {draft['discussion_model']}")
         if draft.get("writing_length_mode"):
             st.caption(f"Writing length: {draft.get('writing_length_mode')}")
+        if draft.get("target_word_count"):
+            st.caption(f"Target article length: about {draft.get('target_word_count')} words, excluding references and tables.")
+            st.caption(f"Estimated generated body length: {draft_body_word_count(draft)} words.")
+        if draft.get("section_word_budget"):
+            with st.expander("Target vs generated section word counts", expanded=False):
+                budget = draft.get("section_word_budget") or {}
+                generated = draft_section_word_counts(draft)
+                rows = []
+                for section, label in [
+                    ("abstract", "Abstract"),
+                    ("introduction", "Introduction"),
+                    ("materials_and_methods", "Materials and Methods"),
+                    ("results", "Results"),
+                    ("discussion", "Discussion"),
+                    ("conclusion", "Conclusion"),
+                ]:
+                    rows.append(
+                        {
+                            "section": label,
+                            "target_words": budget.get(section, ""),
+                            "generated_words": generated.get(section, 0),
+                        }
+                    )
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         section_map = [
             ("Abstract", "abstract"),
             ("Introduction", "introduction"),

@@ -4637,10 +4637,53 @@ Writing length and density directive:
 """
 
 
-def writing_length_directive(mode: str = "Concise style-preserving") -> str:
+def section_word_budget(target_word_count: int = 3750) -> dict[str, int]:
+    try:
+        total = int(target_word_count or 0)
+    except Exception:
+        total = 3750
+    total = max(2000, min(8000, total))
+    weights = {
+        "abstract": 0.06,
+        "introduction": 0.17,
+        "materials_and_methods": 0.16,
+        "results": 0.20,
+        "discussion": 0.36,
+        "conclusion": 0.05,
+    }
+    budgets = {section: max(80, int(round(total * weight / 10) * 10)) for section, weight in weights.items()}
+    difference = total - sum(budgets.values())
+    budgets["discussion"] = max(120, budgets["discussion"] + difference)
+    budgets["total"] = total
+    return budgets
+
+
+def target_word_count_directive(target_word_count: int = 0) -> str:
+    try:
+        total = int(target_word_count or 0)
+    except Exception:
+        total = 0
+    if total <= 0:
+        return ""
+    budgets = section_word_budget(total)
+    return f"""
+Whole-paper target length: about {budgets["total"]} words, excluding references, tables, captions, and appendices.
+Stay within approximately +/-10% of this target. Do not pad the paper only to reach the number.
+Recommended section word budget:
+- Abstract: about {budgets["abstract"]} words.
+- Introduction: about {budgets["introduction"]} words.
+- Materials and Methods: about {budgets["materials_and_methods"]} words.
+- Results: about {budgets["results"]} words.
+- Discussion: about {budgets["discussion"]} words.
+- Conclusion: about {budgets["conclusion"]} words.
+If supplied data are limited, stay shorter rather than inventing detail. If tables are complex, prioritize Results and Discussion while keeping the total target in view.
+""".strip()
+
+
+def writing_length_directive(mode: str = "Concise style-preserving", target_word_count: int = 0) -> str:
     mode_clean = (mode or "").strip().lower()
     if "very" in mode_clean:
-        return """
+        base = """
 Use a very concise but style-preserving manuscript style.
 - Preserve the selected author's syntax, rhetorical movement, hedging, terminology, and evidence discipline.
 - Preserve all essential methods, result values, statistical meaning, citations, and interpretation logic.
@@ -4652,13 +4695,14 @@ Use a very concise but style-preserving manuscript style.
 - Abstract and Conclusion: compact, direct, and publication-ready.
 Do not shorten by deleting essential scientific facts. If brevity conflicts with accuracy, accuracy wins.
 """.strip()
-    if "standard" in mode_clean or "detailed" in mode_clean:
-        return """
+    elif "standard" in mode_clean or "detailed" in mode_clean:
+        base = """
 Use standard full-length manuscript style.
 - Preserve the selected author's style contract and section-specific writing patterns.
 - Include complete methods, result interpretation, discussion comparisons, and evidence use without unnecessary filler.
 """.strip()
-    return """
+    else:
+        base = """
 Use a concise, style-preserving manuscript style.
 - Preserve the selected author's style contract, tone, sentence movement, technical vocabulary, hedging, and rhetorical framing.
 - Keep all essential analysis: methods, result values, statistical meaning, discussion logic, citations, and implications.
@@ -4668,6 +4712,8 @@ Use a concise, style-preserving manuscript style.
 - Discussion must remain style-led and evidence-based, but focus each paragraph on one major finding and its strongest comparison/implication.
 - Do not omit supplied values, treatments, citations, or methodological details that are necessary for scientific accuracy.
 """.strip()
+    word_directive = target_word_count_directive(target_word_count)
+    return f"{base}\n\n{word_directive}".strip() if word_directive else base
 
 
 def write_methodology(
@@ -5229,6 +5275,7 @@ def generate_full_draft(
     styles: dict[str, str],
     selected_papers: list[dict[str, Any]],
     writing_length_mode: str = "Concise style-preserving",
+    target_word_count: int = 3750,
 ) -> dict[str, Any]:
     result_text = combined_uploaded_text(extracted_files)
     analysis = analyze_research_context(
@@ -5241,7 +5288,7 @@ def generate_full_draft(
         result_text,
     )
     title = paper_title.strip() or analysis.get("generated_title") or "Research Paper Draft"
-    length_directive = writing_length_directive(writing_length_mode)
+    length_directive = writing_length_directive(writing_length_mode, target_word_count)
     common = section_prompt_common(
         title,
         authors,
@@ -5304,6 +5351,8 @@ def generate_full_draft(
         "conclusion": conclusion,
         "references": references,
         "writing_length_mode": writing_length_mode,
+        "target_word_count": target_word_count,
+        "section_word_budget": section_word_budget(target_word_count),
         "analysis": analysis,
         "tables": tables,
         "images": images,
