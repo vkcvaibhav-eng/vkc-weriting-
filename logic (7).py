@@ -1969,6 +1969,9 @@ Rules:
 - Methodology references should be original or foundational wherever possible, not generic recent papers that merely used the method.
 - For Methodology, do not request review papers, thesis sources, thesis RoL mining, KrishiKosh, or dissertation sources. Methodology evidence must be original/foundational method literature only.
 - For Discussion, use the drafted Results and Discussion framework as the primary guide: each query must help explain, validate, contrast, or contextualize a finding.
+- Section labels are planning priorities, not hard walls. If a Discussion-planned paper also contains strong background
+  evidence for crop importance, pest status, damage/yield loss, distribution, or research gap, mark it as useful for
+  Introduction citation too.
 - Prefer original primary research papers for direct result comparisons and final citation.
 - Use review papers for broad synthesis, mechanism, framing, and finding original bibliography leads.
 - Use theses only for source-mining queries, especially Krishikosh-style Indian theses; do not plan to cite the thesis itself unless no primary source is available.
@@ -1985,7 +1988,7 @@ Rules:
 
 Return only a JSON object with keys:
 needed_paper_types: array of objects with finding, paper_type, why_needed;
-section_evidence_plan: array of objects with section, evidence_need, source_type_needed, query, why_needed, direct_citation_policy, what_to_extract, writing_use. For Methodology, source_type_needed must be Research Article only;
+section_evidence_plan: array of objects with section, evidence_need, source_type_needed, query, why_needed, direct_citation_policy, what_to_extract, writing_use, possible_cross_section_use. For Methodology, source_type_needed must be Research Article only;
 introduction_search_queries: array of 3-5 precise scholarly search queries;
 methodology_search_queries: array of 0-3 precise scholarly search queries only for named/specific method-citation needs;
 discussion_search_queries: array of {max_queries} precise scholarly search queries;
@@ -2045,6 +2048,9 @@ missing_evidence_questions: array of brief questions the app should answer throu
                     "direct_citation_policy": str(item.get("direct_citation_policy") or item.get("citation_policy") or "").strip(),
                     "what_to_extract": str(item.get("what_to_extract") or item.get("extraction_target") or "").strip(),
                     "writing_use": str(item.get("writing_use") or item.get("use_in_writing") or "").strip(),
+                    "possible_cross_section_use": str(
+                        item.get("possible_cross_section_use") or item.get("secondary_use") or item.get("cross_section_use") or ""
+                    ).strip(),
                 }
             )
         parsed["section_evidence_plan"] = plan_items
@@ -4296,6 +4302,13 @@ Use these Gemini reading notes to choose the most relatable references for the u
 Give priority to sources that directly match the methodology, result pattern, crop/host/pest/problem,
 treatments, location/weather context, or discussion interpretation.
 
+Cross-section citation rule:
+- A source first found for Discussion may still be recommended for the Introduction when it supports broad background,
+  crop/host importance, pest status, damage/yield loss, distribution, regional context, mechanism framing, or a research gap.
+- When that happens, set where_to_use to include both sections, such as "Introduction and Discussion", and explain the
+  different use for each section in why_to_use.
+- Do not move result-comparison material into the Introduction; use only its background or gap-framing value there.
+
 Critical thesis rule:
 - Indian theses, including KrishiKosh theses, are source-mining documents here.
 - Do not recommend citing a thesis itself unless it contains unique primary data and cite_thesis_directly is true.
@@ -4625,18 +4638,74 @@ References are not rewritten here.
         return fallback
 
 
-def reference_context(papers: list[dict[str, Any]], limit: int = 16) -> str:
+def paper_evidence_section(paper: dict[str, Any]) -> str:
+    section = str(paper.get("evidence_section") or "").strip()
+    return section or "Discussion"
+
+
+def prioritize_papers_for_reference_context(
+    papers: list[dict[str, Any]],
+    limit: int,
+    target_section: str = "",
+) -> list[dict[str, Any]]:
+    if not target_section:
+        return papers[:limit]
+    target = target_section.strip().lower()
+    if not target:
+        return papers[:limit]
+
+    def section_is(paper: dict[str, Any], section_name: str) -> bool:
+        return paper_evidence_section(paper).strip().lower() == section_name.lower()
+
+    selected: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def add_many(items: list[dict[str, Any]], max_count: int) -> None:
+        for item in items:
+            if len(selected) >= limit or max_count <= 0:
+                break
+            identity = id(item)
+            if identity in seen:
+                continue
+            selected.append(item)
+            seen.add(identity)
+            max_count -= 1
+
+    target_items = [paper for paper in papers if section_is(paper, target_section)]
+    if target == "introduction":
+        discussion_items = [paper for paper in papers if section_is(paper, "Discussion")]
+        other_items = [paper for paper in papers if not section_is(paper, "Introduction") and not section_is(paper, "Discussion")]
+        add_many(target_items, max(6, limit - 5))
+        add_many(discussion_items, min(5, limit - len(selected)))
+        add_many(other_items, limit - len(selected))
+        add_many(discussion_items, limit - len(selected))
+    else:
+        other_items = [paper for paper in papers if not section_is(paper, target_section)]
+        add_many(target_items, limit)
+        add_many(other_items, limit - len(selected))
+    return selected[:limit]
+
+
+def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_section: str = "") -> str:
     rows = []
-    for paper in papers[:limit]:
+    for paper in prioritize_papers_for_reference_context(papers, limit, target_section):
         full_text = paper.get("full_text") or ""
         gemini_note = paper.get("gemini_note") or {}
         category = paper.get("category") or infer_paper_category(paper)
         direct_citation_allowed = category != "Thesis" or bool(gemini_note.get("cite_thesis_directly"))
+        evidence_section = paper_evidence_section(paper)
         rows.append(
             {
                 "citation": citation_key(paper) if direct_citation_allowed else "THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY",
                 "source_id": citation_key(paper),
                 "direct_citation_allowed": direct_citation_allowed,
+                "planned_evidence_section": evidence_section,
+                "target_writing_section": target_section or "",
+                "cross_section_use_allowed": (
+                    "yes_if_the_source_directly_supports_the_claim_and_the_claim_is_framed_for_this_section"
+                    if target_section and evidence_section != target_section
+                    else "not_needed_or_same_section"
+                ),
                 "thesis_use_policy": gemini_note.get("thesis_citation_policy") if category == "Thesis" else "",
                 "review_use_policy": gemini_note.get("review_citation_policy") if category == "Review Paper" else "",
                 "title": paper.get("title"),
@@ -5082,7 +5151,7 @@ Structured analysis of uploaded methodology/results:
 {json.dumps(analysis, ensure_ascii=True)[:16000]}
 
 Selected references and Gemini reading notes:
-{reference_context(selected_papers)}
+{reference_context(selected_papers, target_section="Discussion")}
 
 Results section already drafted:
 {truncate_text(results_section, 9000)}
@@ -5100,6 +5169,8 @@ Rules:
 - Every paragraph framework item must start from a supplied result/finding.
 - Do not invent citations, author names, years, or unsupported mechanisms.
 - Use thesis and review mined leads only as search/interpretation guidance unless the original primary paper is selected.
+- Evidence-section labels are planning priorities only. A source may support more than one manuscript section when
+  its evidence actually fits the claim being written.
 - For Introduction, thesis-mined leads should come from thesis introduction/background/problem statement and bibliography.
 - For Discussion, thesis-mined leads may come from thesis RoL.
 - Make the plan style-led: the rhetorical move should be more than "report finding"; it should frame, validate,
@@ -5170,7 +5241,7 @@ Preferred comparison vocabulary:
 {style_excerpt(styles, "word_bank", 3500)}
 
 Selected references allowed for citation:
-{reference_context(selected_papers)}
+{reference_context(selected_papers, target_section="Discussion")}
 
 Discussion framework to follow:
 {json.dumps(discussion_framework or {}, ensure_ascii=True)[:18000]}
@@ -5178,6 +5249,8 @@ Discussion framework to follow:
 Rules:
 - Academic writing style, framing, and validation rhetoric take precedence over plain logical reporting.
 - Interpret the supplied results and compare them with selected references only.
+- Evidence-section labels are planning priorities. If an Introduction-planned source also supports a Discussion
+  mechanism, comparison, or implication, it may be used here, but the claim must match the evidence.
 - The paragraph order must follow the Discussion framework where possible: finding -> explanation -> validation or contrast
   with related work -> review synthesis where appropriate -> limitation or implication.
 - Each paragraph must justify the finding by contextualizing it with related work, not merely list previous studies.
@@ -5236,7 +5309,7 @@ Dictionary and transition guidance:
 {style_excerpt(styles, "introduction_dictionary", 4500)}
 
 Selected references allowed for citation:
-{reference_context(selected_papers, limit=10)}
+{reference_context(selected_papers, limit=18, target_section="Introduction")}
 
 Rules:
 - Start broad with crop/host importance when available.
@@ -5245,6 +5318,10 @@ Rules:
 - End with a clear objective sentence.
 - Prefer review-paper evidence and thesis introduction/background bibliography notes for locating original studies
   that support crop importance, pest status, damage, distribution, regional context, and gap framing.
+- A source first selected for Discussion may also be cited in the Introduction when it contains valid background
+  evidence for crop importance, pest status, damage/yield loss, distribution, mechanism framing, or research gap.
+- When using a Discussion-planned source in the Introduction, frame it as background or study justification; keep
+  direct comparison with the present Results for the Discussion section.
 - Do not cite theses marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY; cite only directly citable selected
   primary papers or review papers. If a useful study appears only as a thesis source-mining lead, mention it as a
   search need, not as a citation.

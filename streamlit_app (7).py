@@ -664,6 +664,9 @@ def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] |
                 ).strip(),
                 "what_to_extract": str(item.get("what_to_extract") or fallback_extract_target(section, source_type)).strip(),
                 "writing_use": str(item.get("writing_use") or fallback_writing_use(section, source_type)).strip(),
+                "possible_cross_section_use": str(
+                    item.get("possible_cross_section_use") or item.get("secondary_use") or item.get("cross_section_use") or ""
+                ).strip(),
             }
         )
 
@@ -694,6 +697,7 @@ def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] |
                     "direct_citation_policy": citation_policy_for_category(source_type),
                     "what_to_extract": fallback_extract_target(section, source_type),
                     "writing_use": fallback_writing_use(section, source_type),
+                    "possible_cross_section_use": "",
                 }
             )
 
@@ -716,6 +720,7 @@ def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] |
                 "direct_citation_policy": citation_policy_for_category(source_type),
                 "what_to_extract": fallback_extract_target(section, source_type),
                 "writing_use": fallback_writing_use(section, source_type),
+                "possible_cross_section_use": "",
             }
         )
     return items
@@ -779,6 +784,7 @@ def annotate_papers_with_evidence_plan(papers: list[dict], analysis: dict | None
         paper["why_needed"] = match.get("why_needed") if match else paper["evidence_need"]
         paper["what_to_extract"] = match.get("what_to_extract") if match else fallback_extract_target(section, actual_type)
         paper["writing_use"] = match.get("writing_use") if match else fallback_writing_use(section, actual_type)
+        paper["possible_cross_section_use"] = match.get("possible_cross_section_use", "") if match else ""
         paper["found_query"] = found_query
     return papers
 
@@ -809,6 +815,7 @@ def evidence_plan_rows(plan_items: list[dict], section: str | None = None) -> pd
                 "why_needed": item.get("why_needed", ""),
                 "what_to_extract": item.get("what_to_extract", ""),
                 "writing_use": item.get("writing_use", ""),
+                "possible_cross_section_use": item.get("possible_cross_section_use", ""),
                 "citation_policy": item.get("direct_citation_policy", ""),
             }
         )
@@ -838,6 +845,7 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
                 "citation_policy": paper.get("citation_policy", citation_policy_for_category(paper.get("category", "Research Article"))),
                 "writing_use": paper.get("writing_use", ""),
                 "what_to_extract": paper.get("what_to_extract", ""),
+                "possible_cross_section_use": paper.get("possible_cross_section_use", ""),
                 "citation": citation_key(paper),
                 "year": paper.get("year"),
                 "citations": paper.get("citation_count", 0),
@@ -863,6 +871,7 @@ PAPER_TABLE_DISABLED_COLUMNS = [
     "citation_policy",
     "writing_use",
     "what_to_extract",
+    "possible_cross_section_use",
     "citation",
     "year",
     "citations",
@@ -1509,7 +1518,7 @@ with tabs[2]:
             count_cols[4].metric("Methodology", section_counts.get("Methodology", 0))
             count_cols[5].metric("Discussion", section_counts.get("Discussion", 0))
             st.caption(
-                "Select references by manuscript section first. Methodology uses only research/original method papers; review papers and theses are kept for Introduction and Discussion evidence mining."
+                "Select references by manuscript section first. Section labels guide priority, but a Discussion source can still support Introduction background if the evidence fits. Methodology uses only research/original method papers; review papers and theses are kept for Introduction and Discussion evidence mining."
             )
             plan_items = search_result.get("section_evidence_plan") or section_plan_items_from_analysis(
                 analysis,
