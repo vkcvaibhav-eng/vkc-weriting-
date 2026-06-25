@@ -1967,6 +1967,7 @@ Rules:
 - For Methodology, do not make broad queries for experimental design, RBD/CRD/RCBD, replications, ANOVA, or general statistical analysis. The methodology is already supplied by the user.
 - For Methodology, make queries only for specific citation/correction needs: named formulas, protocols, bioassay methods, mortality/yield-loss correction methods, probit analysis, LC50/LD50 analysis, or original/foundational method references such as Finney for probit analysis.
 - Methodology references should be original or foundational wherever possible, not generic recent papers that merely used the method.
+- For Methodology, do not request review papers, thesis sources, thesis RoL mining, KrishiKosh, or dissertation sources. Methodology evidence must be original/foundational method literature only.
 - For Discussion, use the drafted Results and Discussion framework as the primary guide: each query must help explain, validate, contrast, or contextualize a finding.
 - Prefer original primary research papers for direct result comparisons and final citation.
 - Use review papers for broad synthesis, mechanism, framing, and finding original bibliography leads.
@@ -1982,7 +1983,7 @@ Rules:
 
 Return only a JSON object with keys:
 needed_paper_types: array of objects with finding, paper_type, why_needed;
-section_evidence_plan: array of objects with section, evidence_need, source_type_needed, query, why_needed, direct_citation_policy, what_to_extract, writing_use;
+section_evidence_plan: array of objects with section, evidence_need, source_type_needed, query, why_needed, direct_citation_policy, what_to_extract, writing_use. For Methodology, source_type_needed must be Research Article only;
 introduction_search_queries: array of 3-5 precise scholarly search queries;
 methodology_search_queries: array of 0-3 precise scholarly search queries only for named/specific method-citation needs;
 discussion_search_queries: array of {max_queries} precise scholarly search queries;

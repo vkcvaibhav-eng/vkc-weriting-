@@ -404,6 +404,10 @@ SOURCE_TYPE_SECTIONS = [
     ("Theses / RoL mining", "Thesis", "thesis_sources"),
 ]
 
+METHODOLOGY_SOURCE_TYPE_SECTIONS = [
+    ("Research / original method papers", "Research Article", "research_papers"),
+]
+
 
 def normalize_match_text(value) -> str:
     return " ".join(str(value or "").lower().replace("/", " ").replace("-", " ").split())
@@ -441,6 +445,10 @@ def normalize_source_type(value, category: str = "") -> str:
 
 def source_type_from_category(category: str) -> str:
     return normalize_source_type(category, category or "Research Article")
+
+
+def methodology_allows_source_type(source_type: str) -> bool:
+    return normalize_source_type(source_type) == "Research Article"
 
 
 def citation_policy_for_category(category: str) -> str:
@@ -562,9 +570,9 @@ def fallback_evidence_need(section: str, category: str) -> str:
         return "Support crop/pest importance, damage/yield-loss evidence, and objective justification."
     if section == "Methodology":
         if source_type == "Thesis":
-            return "Mine only named method/protocol citation leads from similar thesis work; avoid broad design or statistics references."
+            return "Not used for Methodology. Select original/foundational method papers instead of thesis mining."
         if source_type == "Review Paper":
-            return "Use only when it identifies an original method, formula, protocol, or correction reference."
+            return "Not used for Methodology. Select original/foundational method papers instead of review papers."
         return "Find original/foundational citations for specific named methods, formulas, bioassays, corrections, or analyses such as Finney for probit; do not search generic design/statistics."
     if source_type == "Thesis":
         return "Mine Review of Literature and references for original studies that explain or compare with our Results."
@@ -614,6 +622,9 @@ def collect_plan_queries(claude_plan: dict) -> list[str]:
         if isinstance(item, dict):
             clean_query = clean_query_text(item.get("query") or item.get("search_query"))
             section = normalize_evidence_section(item.get("section"))
+            source_type = normalize_source_type(item.get("source_type_needed") or item.get("paper_type"))
+            if section == "Methodology" and not methodology_allows_source_type(source_type):
+                continue
             if section == "Methodology" and clean_query and not keep_methodology_query(clean_query):
                 continue
             if clean_query:
@@ -634,6 +645,8 @@ def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] |
         if section == "Methodology" and query and not keep_methodology_query(query):
             continue
         source_type = normalize_source_type(item.get("source_type_needed") or item.get("paper_type"))
+        if section == "Methodology" and not methodology_allows_source_type(source_type):
+            continue
         evidence_need = str(item.get("evidence_need") or item.get("target_evidence") or fallback_evidence_need(section, source_type)).strip()
         items.append(
             {
@@ -753,6 +766,8 @@ def annotate_papers_with_evidence_plan(papers: list[dict], analysis: dict | None
         )
         match = match_plan_item_for_paper(paper, plan_items)
         section = normalize_evidence_section(match.get("section")) if match else infer_evidence_section_from_text(found_query or paper.get("title", ""), actual_type)
+        if section == "Methodology" and not methodology_allows_source_type(actual_type):
+            section = "Other"
         paper["evidence_section"] = section
         paper["source_type_needed"] = match.get("source_type_needed") if match else actual_type
         paper["evidence_need"] = match.get("evidence_need") if match else fallback_evidence_need(section, actual_type)
@@ -1490,7 +1505,7 @@ with tabs[2]:
             count_cols[4].metric("Methodology", section_counts.get("Methodology", 0))
             count_cols[5].metric("Discussion", section_counts.get("Discussion", 0))
             st.caption(
-                "Select references by manuscript section first. Each section contains separate research-paper, review-paper, and thesis/RoL-mining baskets."
+                "Select references by manuscript section first. Methodology uses only research/original method papers; review papers and theses are kept for Introduction and Discussion evidence mining."
             )
             plan_items = search_result.get("section_evidence_plan") or section_plan_items_from_analysis(
                 analysis,
@@ -1528,8 +1543,11 @@ with tabs[2]:
                         for paper in papers
                         if (paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", ""))) == section
                     ]
-                    source_tabs = st.tabs([label for label, _category, _key in source_sections])
-                    for source_tab, (label, category, key_suffix) in zip(source_tabs, source_sections):
+                    active_source_sections = METHODOLOGY_SOURCE_TYPE_SECTIONS if section == "Methodology" else source_sections
+                    if section == "Methodology":
+                        st.caption("Methodology evidence is limited to original/foundational method citations. Review-paper and thesis mining are not used here.")
+                    source_tabs = st.tabs([label for label, _category, _key in active_source_sections])
+                    for source_tab, (label, category, key_suffix) in zip(source_tabs, active_source_sections):
                         with source_tab:
                             if category == "__OTHER__":
                                 category_papers = [
