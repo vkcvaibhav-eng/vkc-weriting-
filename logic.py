@@ -3789,6 +3789,7 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
         if isinstance(lead, dict):
             explicit = (
                 lead.get("search_query_to_find_primary_paper")
+                or lead.get("search_query_to_find_cited_paper")
                 or lead.get("search_query")
                 or lead.get("query")
             )
@@ -3798,6 +3799,7 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
             author_year = (
                 lead.get("author_year")
                 or lead.get("cited_author_year")
+                or lead.get("in_text_citation")
                 or lead.get("citation")
                 or lead.get("reference")
             )
@@ -3805,6 +3807,8 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
             topic = (
                 lead.get("objective_or_topic")
                 or lead.get("matched_objective_or_result")
+                or lead.get("matched_user_result_or_discussion_need")
+                or lead.get("discussion_topic_or_finding")
                 or lead.get("rol_heading_or_topic")
                 or lead.get("topic")
                 or lead.get("why_it_matches")
@@ -3815,6 +3819,8 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
                 or lead.get("key_result")
                 or lead.get("concise_rol_content")
                 or lead.get("full_block_paraphrase")
+                or lead.get("full_discussion_paraphrase")
+                or lead.get("evidence_context_in_discussion")
                 or lead.get("why_useful_for_discussion")
             )
             bibliography_entry = lead.get("bibliography_entry_if_found") or lead.get("bibliography_entry")
@@ -3903,7 +3909,7 @@ def selected_pdf_page_indices_for_image_reading(page_count: int, category: str =
         indices = list(range(min(page_count, leading)))
         if trailing:
             indices.extend(range(max(0, page_count - trailing), page_count))
-    elif "review" in category_lower:
+    elif "review" in category_lower or "research" in category_lower or "article" in category_lower:
         leading = max(1, max_pages - min(6, max_pages // 3))
         indices = list(range(min(page_count, leading)))
         indices.extend(range(max(0, page_count - min(6, max_pages - len(indices))), page_count))
@@ -3979,6 +3985,17 @@ def gemini_mine_pdf_images_for_source_text(
 - For every visible citation in a matched RoL block, search the visible references/bibliography pages in this batch and capture
   the full bibliography entry if present, plus a search query for the original paper.
 """.strip()
+    elif "research" in category_lower or "article" in category_lower:
+        mining_task = """
+- For research articles, focus on visible Discussion, Results and Discussion, Conclusion/Implications, and references pages.
+- Read the whole visible Discussion or Results and Discussion block before summarizing it. Do not stop at only the
+  most similar sentence.
+- Extract the complete discussion evidence flow in paraphrase: finding/topic -> explanation/mechanism -> agreement or
+  contrast with cited studies -> implication or limitation.
+- Capture every visible in-text citation used in the Discussion block and match it to bibliography/reference entries
+  when visible. Keep reference entries as searchable original-reference leads.
+- Include only short exact excerpts for verification; do not reproduce long Discussion text.
+""".strip()
     else:
         mining_task = """
 - If these pages contain review synthesis, references, bibliography, or literature cited, extract original author-year study leads,
@@ -4051,6 +4068,32 @@ def extract_thesis_introduction_section(text: str, limit: int = 16000) -> str:
     )
 
 
+def extract_research_discussion_section(text: str, limit: int = 30000) -> str:
+    if not text:
+        return ""
+    lower = text.lower()
+    heading_matches = list(
+        re.finditer(
+            r"(?im)^\s*(\d+[\.\)]\s*)?(results?\s+and\s+discussion|discussion)\s*$",
+            text,
+        )
+    )
+    if heading_matches:
+        start = heading_matches[0].start()
+        end = len(text)
+        for marker in ["conclusion", "conclusions", "summary", "acknowledgement", "acknowledgment", "references", "bibliography", "literature cited"]:
+            position = lower.find(marker, start + 50)
+            if position >= 0:
+                end = min(end, position)
+        return truncate_text(text[start:end], limit)
+    return extract_section_between_markers(
+        text,
+        ["results and discussion", "result and discussion", "\ndiscussion"],
+        ["conclusion", "conclusions", "summary", "acknowledgement", "acknowledgment", "references", "bibliography", "literature cited"],
+        limit=limit,
+    )
+
+
 def extract_references_section(text: str, limit: int = 14000) -> str:
     if not text:
         return ""
@@ -4073,6 +4116,12 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "methodology_links": [],
         "result_links": [],
         "discussion_points": [],
+        "research_discussion_notes": "",
+        "research_discussion_full_coverage": [],
+        "research_discussion_citation_map": [],
+        "research_discussion_reference_leads": [],
+        "research_discussion_search_queries": [],
+        "research_discussion_verification_excerpts": [],
         "thesis_introduction_notes": "",
         "review_of_literature_notes": "",
         "reference_list_notes": "",
@@ -4132,7 +4181,7 @@ def gemini_read_reference(
         bool(pdf_path)
         and Path(pdf_path).exists()
         and len(full_text) < MIN_USEFUL_PDF_TEXT_CHARS
-        and category in {"Thesis", "Review Paper"}
+        and category in {"Thesis", "Review Paper", "Research Article"}
     )
     if low_text_pdf:
         image_mined_text = gemini_mine_pdf_images_for_source_text(
@@ -4155,7 +4204,8 @@ def gemini_read_reference(
 
     thesis_introduction = extract_thesis_introduction_section(full_text) if category == "Thesis" else ""
     literature_review = extract_literature_review_section(full_text) if category == "Thesis" and evidence_section != "Introduction" else ""
-    references_section = extract_references_section(full_text) if category in {"Thesis", "Review Paper"} else ""
+    research_discussion = extract_research_discussion_section(full_text) if category == "Research Article" else ""
+    references_section = extract_references_section(full_text) if category in {"Thesis", "Review Paper", "Research Article"} else ""
     readable_text = full_text or abstract
     if category == "Thesis" and evidence_section == "Introduction":
         thesis_reading_rule = """
@@ -4213,6 +4263,25 @@ For theses:
 - thesis_citation_policy must be "do_not_cite_thesis_directly" unless the thesis contains unique primary data that must be cited.
 - cite_thesis_directly must be false unless direct thesis citation is unavoidable and you explain why in why_relevant.
 """.strip()
+    research_article_reading_rule = """
+For research articles:
+- If a Discussion or Results and Discussion section is supplied, read the whole supplied section before judging relevance.
+- Do not copy the article's Discussion wording into the manuscript. Use it for evidence logic, comparison structure,
+  mechanisms, and source-mining.
+- research_discussion_notes must summarize the complete Discussion logic relevant to our study.
+- research_discussion_full_coverage must be an array of objects with discussion_topic_or_finding,
+  matched_user_result_or_discussion_need, section_location_if_available, full_discussion_block_read_status,
+  estimated_discussion_block_word_count, full_discussion_paraphrase, mechanisms_or_explanations,
+  agreement_or_contrast_claims, all_in_text_citations_in_block, and how_to_use_in_our_discussion.
+- If the paper has a combined Results and Discussion section, extract only the discussion/explanation/comparison parts,
+  while preserving links to the result statements they explain.
+- research_discussion_citation_map must map each Discussion in-text citation to bibliography_entry_if_found,
+  exact_title_if_found, evidence_context_in_discussion, support_or_contrast, search_query_to_find_cited_paper, and confidence.
+- research_discussion_reference_leads must list the full bibliography entries cited inside the Discussion/Results and Discussion.
+- research_discussion_search_queries must list precise queries for finding those cited original papers again.
+- research_discussion_verification_excerpts may include short exact excerpts only for verification. Keep each excerpt
+  under 120 words and do not use those exact words in manuscript drafting.
+""".strip()
 
     prompt = f"""
 You are reading one scholarly source for a research-paper writing app.
@@ -4233,6 +4302,9 @@ Abstract:
 Full text or available source text:
 {truncate_text(readable_text, 22000)}
 
+Research-article Discussion or Results and Discussion section, if detected:
+{truncate_text(research_discussion, 30000)}
+
 Thesis introduction/background section, if detected:
 {truncate_text(thesis_introduction, 16000)}
 
@@ -4247,7 +4319,10 @@ Selected author writing-style contract to keep in view while reading:
 
 Return only a JSON object with these keys:
 citation, title, category, evidence_source, overall_relevance, why_relevant,
-methodology_links, result_links, discussion_points, thesis_introduction_notes,
+methodology_links, result_links, discussion_points, research_discussion_notes,
+research_discussion_full_coverage, research_discussion_citation_map,
+research_discussion_reference_leads, research_discussion_search_queries,
+research_discussion_verification_excerpts, thesis_introduction_notes,
 review_of_literature_notes, reference_list_notes, most_useful_references,
 introduction_reference_leads, objective_matched_rol_extracts,
 objective_matched_rol_full_block_coverage,
@@ -4260,6 +4335,7 @@ review_citation_policy, cite_review_directly, usable_citation_sentences,
 shelton_style_use, selected_style_use, missing_evidence_or_data.
 
 {thesis_reading_rule}
+{research_article_reading_rule}
 For review papers:
 - Treat the review as a synthesis source and a bibliography-mining map, not as primary experimental evidence.
 - Extract discussion insights that match our objectives/results into review_synthesis_insights. Each insight should include
@@ -4271,7 +4347,7 @@ For review papers:
 - review_citation_policy must be "cite_review_for_broad_synthesis_only_and_cite_original_primary_sources_for_specific_findings".
 - cite_review_directly can be true for broad background/synthesis statements, but specific methods/results/comparisons should
   cite original primary papers after they are found and selected.
-For non-thesis/non-review papers, keep source-mining-only fields empty if not applicable.
+For source-mining fields that do not apply to the current category, keep them empty.
 In shelton_style_use and selected_style_use, explain exactly how this evidence should be used in the selected author-style introduction,
 methods justification, results support, or discussion comparison.
 In missing_evidence_or_data, name extra papers, variables, statistics, or data details that would make the
@@ -4320,6 +4396,8 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
         )
     thesis_leads = []
     objective_rol_leads = []
+    research_discussion_leads = []
+    research_discussion_maps = []
     review_leads = []
     review_insights = []
     for paper in papers:
@@ -4334,6 +4412,10 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
             thesis_leads.extend(note.get("objective_matched_rol_bibliography") or [])
             thesis_leads.extend(note.get("objective_matched_rol_search_queries") or [])
             thesis_leads.extend(note.get("primary_study_leads") or [])
+        elif category == "Research Article":
+            research_discussion_leads.extend(note.get("research_discussion_reference_leads") or [])
+            research_discussion_leads.extend(note.get("research_discussion_search_queries") or [])
+            research_discussion_maps.extend(note.get("research_discussion_citation_map") or [])
         elif category == "Review Paper":
             review_insights.extend(note.get("review_synthesis_insights") or [])
             review_leads.extend(note.get("review_reference_leads") or [])
@@ -4344,6 +4426,8 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
         "thesis_reference_leads": thesis_leads[:20],
         "thesis_primary_study_leads": thesis_leads[:20],
         "objective_matched_rol_leads": objective_rol_leads[:20],
+        "research_discussion_reference_leads": research_discussion_leads[:30],
+        "research_discussion_citation_map": research_discussion_maps[:30],
         "review_discussion_insights": review_insights[:20],
         "review_reference_leads": review_leads[:20],
         "review_primary_study_leads": review_leads[:20],
@@ -4417,6 +4501,16 @@ Critical thesis rule:
 - short_exact_rol_excerpt and objective_matched_rol_verbatim_excerpts are verification-only. Do not reuse those exact
   words in drafted Introduction, Discussion, or citation sentences.
 
+Critical research-article Discussion rule:
+- For research articles with downloaded PDFs, use research_discussion_full_coverage to understand the paper's complete
+  Discussion or Results and Discussion logic.
+- Use research_discussion_citation_map and research_discussion_reference_leads to identify the original references cited
+  inside that paper's Discussion.
+- Recommend those cited references as source-mining leads when they are relevant to our Discussion. They should be
+  searched/selected/read before final citation whenever possible.
+- Do not copy the research article's Discussion wording into the manuscript. research_discussion_verification_excerpts
+  are verification-only.
+
 Critical review-paper rule:
 - Use review papers to mine broad discussion insights related to our objectives and results.
 - Put those insights in review_discussion_insights so they can guide the Discussion.
@@ -4437,6 +4531,8 @@ Reading notes:
 
 Return only a JSON object with keys:
 best_references: array of objects with citation, title, category, why_to_use, where_to_use;
+research_discussion_reference_leads: array of bibliography entries or source leads cited inside research-article Discussion sections;
+research_discussion_citation_map: array of objects mapping in-text Discussion citations to bibliography entries and search queries;
 thesis_reference_leads: array of bibliography entries or source leads found inside thesis references;
 thesis_primary_study_leads: array of primary author-year study leads extracted from thesis Introduction/RoL/bibliography;
 objective_matched_rol_leads: array of objects with matched_objective_or_result, cited_author_years, bibliography_entries, search_queries, full_block_paraphrase, why_useful_for_discussion;
@@ -4839,6 +4935,14 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
                     "methodology_links": gemini_note.get("methodology_links", [])[:5],
                     "result_links": gemini_note.get("result_links", [])[:5],
                     "discussion_points": gemini_note.get("discussion_points", [])[:6],
+                    "research_discussion_notes": truncate_text(gemini_note.get("research_discussion_notes", ""), 900),
+                    "research_discussion_full_coverage": gemini_note.get("research_discussion_full_coverage", [])[:8],
+                    "research_discussion_citation_map": gemini_note.get("research_discussion_citation_map", [])[:10],
+                    "research_discussion_reference_leads": gemini_note.get("research_discussion_reference_leads", [])[:10],
+                    "research_discussion_search_queries": gemini_note.get("research_discussion_search_queries", [])[:10],
+                    "research_discussion_verification_excerpt_count": len(
+                        gemini_note.get("research_discussion_verification_excerpts", []) or []
+                    ),
                     "thesis_introduction_notes": truncate_text(gemini_note.get("thesis_introduction_notes", ""), 900),
                     "review_of_literature_notes": truncate_text(gemini_note.get("review_of_literature_notes", ""), 900),
                     "introduction_reference_leads": gemini_note.get("introduction_reference_leads", [])[:10],
@@ -5398,6 +5502,9 @@ Rules:
   evidence logic in the selected style.
 - Use review-paper synthesis insights to frame the discussion, but do not use a review as the only support for a
   specific experimental result or method comparison when the original primary paper lead has not been selected/read.
+- For selected research articles, use research_discussion_full_coverage to understand how their Discussion explains
+  comparable findings, and use research_discussion_citation_map to identify cited original references. Do not copy
+  research_discussion_verification_excerpts or the article's Discussion wording.
 - If review bibliography leads are present but the original papers are not selected, mention the need cautiously
   rather than inventing citations.
 - Use APA in-text citations exactly like the provided citation strings.

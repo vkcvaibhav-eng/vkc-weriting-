@@ -46,6 +46,7 @@ from logic import (
     search_and_rank_papers,
     section_word_budget,
     section_prompt_common,
+    source_mined_primary_study_search_queries,
     suggest_style_aligned_followup_needs,
     summarize_gemini_reference_notes,
     table_to_plain_text,
@@ -1785,6 +1786,66 @@ with tabs[3]:
                 with st.expander("Review paper to use", expanded=True):
                     st.write(review)
 
+            research_discussion_map = recommendations.get("research_discussion_citation_map") or []
+            research_discussion_leads = recommendations.get("research_discussion_reference_leads") or []
+            if research_discussion_map:
+                with st.expander("Research-paper Discussion citation map", expanded=True):
+                    for mapped_reference in research_discussion_map[:30]:
+                        st.write(mapped_reference)
+            if research_discussion_leads:
+                with st.expander("Original references cited inside research-paper Discussions", expanded=True):
+                    for lead in research_discussion_leads[:30]:
+                        st.write(lead)
+                research_discussion_queries = source_mined_primary_study_search_queries(
+                    research_discussion_leads + research_discussion_map,
+                    current_context_text(inputs, extracted_files),
+                )
+                if research_discussion_queries:
+                    with st.expander("Primary-paper search queries from research Discussion citations", expanded=False):
+                        for query in research_discussion_queries:
+                            st.code(query, language="text")
+                    if st.button("Search original papers from research Discussion citations now", type="primary", width="stretch"):
+                        context_text = current_context_text(inputs, extracted_files)
+                        with st.spinner("Searching original papers cited inside selected research-paper Discussions..."):
+                            extra_search = search_and_rank_papers(
+                                queries=research_discussion_queries,
+                                context_text=context_text,
+                                semantic_key=st.session_state.semantic_key,
+                                serpapi_key=st.session_state.serpapi_key,
+                                core_key=st.session_state.core_key,
+                                perplexity_key=st.session_state.perplexity_key,
+                                perplexity_model=st.session_state.perplexity_model,
+                                openai_key=st.session_state.openai_key,
+                                model=st.session_state.model,
+                                reference_count=st.session_state.reference_count,
+                                per_query_limit=st.session_state.per_query_limit,
+                                use_ai_scoring=st.session_state.use_ai_scoring,
+                            )
+                        extra_search = annotate_search_result_with_evidence_plan(
+                            extra_search,
+                            st.session_state.get("analysis") or {},
+                            research_discussion_queries,
+                        )
+                        st.session_state.paper_search = merge_search_results(
+                            st.session_state.get("paper_search") or {},
+                            extra_search,
+                            st.session_state.reference_count,
+                        )
+                        st.session_state.paper_search = annotate_search_result_with_evidence_plan(
+                            st.session_state.paper_search,
+                            st.session_state.get("analysis") or {},
+                            st.session_state.get("queries", []),
+                        )
+                        st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
+                        selected_ids = {str(item.get("paper_id")) for item in st.session_state.selected_papers}
+                        st.session_state.downloaded_references = [
+                            item for item in st.session_state.get("downloaded_references", [])
+                            if str(item.get("paper_id")) in selected_ids
+                        ]
+                        st.success(
+                            f"Merged research-discussion citation search. Selected {len(st.session_state.selected_papers)} sources."
+                        )
+
             review_insights = recommendations.get("review_discussion_insights") or []
             if review_insights:
                 with st.expander("Review-paper insights for Discussion", expanded=True):
@@ -2027,6 +2088,34 @@ with tabs[3]:
             )
         if note_rows:
             st.dataframe(pd.DataFrame(note_rows), width="stretch", hide_index=True)
+
+        research_discussion_notes = [
+            (paper, paper.get("gemini_note") or {})
+            for paper in st.session_state.get("selected_papers", [])
+            if paper.get("category") == "Research Article" and paper.get("gemini_note")
+        ]
+        if research_discussion_notes:
+            with st.expander("Research-paper Discussion mining notes", expanded=False):
+                for paper, note in research_discussion_notes:
+                    st.markdown(f"**{citation_key(paper)} {paper.get('title', '')}**")
+                    if note.get("research_discussion_notes"):
+                        st.write(note["research_discussion_notes"])
+                    if note.get("research_discussion_full_coverage"):
+                        st.markdown("**Full Discussion / Results and Discussion coverage**")
+                        for coverage in note.get("research_discussion_full_coverage", [])[:8]:
+                            st.write(coverage)
+                    if note.get("research_discussion_citation_map"):
+                        st.markdown("**Discussion citation to bibliography map**")
+                        for mapped_reference in note.get("research_discussion_citation_map", [])[:12]:
+                            st.write(mapped_reference)
+                    if note.get("research_discussion_reference_leads"):
+                        st.markdown("**References cited inside Discussion**")
+                        for reference in note.get("research_discussion_reference_leads", [])[:12]:
+                            st.write(reference)
+                    if note.get("research_discussion_verification_excerpts"):
+                        st.markdown("**Short exact Discussion excerpts for verification only**")
+                        for excerpt in note.get("research_discussion_verification_excerpts", [])[:6]:
+                            st.write(excerpt)
 
         thesis_notes = [
             (paper, paper.get("gemini_note") or {})
