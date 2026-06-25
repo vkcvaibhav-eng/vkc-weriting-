@@ -2045,6 +2045,10 @@ with tabs[3]:
                         st.markdown("**Objective-matched RoL extracts**")
                         for extract in note.get("objective_matched_rol_extracts", [])[:8]:
                             st.write(extract)
+                    if note.get("objective_matched_rol_full_block_coverage"):
+                        st.markdown("**Full matched RoL block coverage**")
+                        for coverage in note.get("objective_matched_rol_full_block_coverage", [])[:8]:
+                            st.write(coverage)
                     if note.get("objective_matched_rol_verbatim_excerpts"):
                         st.markdown("**Short exact RoL excerpts for verification only**")
                         for excerpt in note.get("objective_matched_rol_verbatim_excerpts", [])[:8]:
