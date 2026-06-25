@@ -1563,9 +1563,9 @@ with tabs[2]:
             selected_papers = st.session_state.get("selected_papers", [])
             if selected_papers:
                 st.divider()
-                st.subheader("Download and Read Selected Papers")
+                st.subheader("Download and Extract Selected PDFs")
                 st.caption(
-                    "Use this before drafting so the discussion can use full-paper text, not only title or abstract."
+                    "Use this before Gemini reading so the app can extract full-paper text first."
                 )
                 dl_cols = st.columns(4)
                 dl_cols[0].metric("Selected", len(selected_papers))
@@ -1574,7 +1574,7 @@ with tabs[2]:
                 dl_cols[2].metric("Downloaded", len([p for p in downloaded_refs if p.get("download_success")]))
                 dl_cols[3].metric("Readable chars", sum(int(p.get("full_text_chars") or 0) for p in downloaded_refs))
 
-                if st.button("Download and read selected PDFs", type="primary", width="stretch"):
+                if st.button("Download and extract selected PDFs", type="primary", width="stretch"):
                     with st.spinner("Finding open PDFs, downloading selected papers, and extracting full text..."):
                         downloaded = download_and_read_selected_papers(
                             selected_papers,
@@ -1582,23 +1582,17 @@ with tabs[2]:
                             core_key=st.session_state.core_key,
                             semantic_key=st.session_state.semantic_key,
                         )
-                    if st.session_state.gemini_key:
-                        context_text = current_context_text(inputs, extracted_files)
-                        with st.spinner("Google Gemini is reading papers, thesis literature reviews, and thesis references..."):
-                            downloaded = gemini_read_selected_papers(
-                                downloaded,
-                                context_text,
-                                st.session_state.gemini_key,
-                                st.session_state.gemini_model,
-                                current_style_profile(),
-                            )
-                            st.session_state.gemini_recommendations = summarize_gemini_reference_notes(
-                                downloaded,
-                                context_text,
-                                st.session_state.gemini_key,
-                                st.session_state.gemini_model,
-                                current_style_profile(),
-                            )
+                    existing_notes = {
+                        str(item.get("paper_id")): item
+                        for item in [*selected_papers, *st.session_state.get("downloaded_references", [])]
+                        if item.get("gemini_note")
+                    }
+                    for item in downloaded:
+                        existing = existing_notes.get(str(item.get("paper_id")))
+                        if existing and not item.get("gemini_note"):
+                            for key, value in existing.items():
+                                if key.startswith("gemini") or key in {"gemini_note"}:
+                                    item[key] = value
                     by_id = {str(item.get("paper_id")): item for item in downloaded}
                     st.session_state.selected_papers = [by_id.get(str(p.get("paper_id")), p) for p in selected_papers]
                     st.session_state.downloaded_references = downloaded
@@ -1608,11 +1602,10 @@ with tabs[2]:
                             updated_papers.append(by_id.get(str(paper.get("paper_id")), paper))
                         st.session_state.paper_search["papers"] = updated_papers
                     success_count = len([p for p in downloaded if p.get("download_success")])
-                    gemini_count = len([p for p in downloaded if p.get("gemini_note")])
-                    if st.session_state.gemini_key:
-                        st.success(f"Downloaded/read {success_count}/{len(downloaded)} PDF(s); Gemini read {gemini_count} selected source(s).")
-                    else:
-                        st.success(f"Downloaded/read {success_count}/{len(downloaded)} selected paper(s). Add a Gemini key to read and rank the sources.")
+                    st.success(
+                        f"Downloaded/extracted {success_count}/{len(downloaded)} selected source(s). "
+                        "Use the Gemini Reading tab once to analyze them."
+                    )
 
                 downloaded_refs = st.session_state.get("downloaded_references", [])
                 if downloaded_refs:
@@ -1667,14 +1660,23 @@ with tabs[3]:
             else:
                 context_text = current_context_text(inputs, extracted_files)
                 source_papers = downloaded_refs or selected_papers
-                with st.spinner("Gemini is reading abstracts, downloaded full papers, thesis literature reviews, and thesis references..."):
-                    read_papers = gemini_read_selected_papers(
-                        source_papers,
-                        context_text,
-                        st.session_state.gemini_key,
-                        st.session_state.gemini_model,
-                        current_style_profile(),
-                    )
+                unread_papers = [paper for paper in source_papers if not paper.get("gemini_note")]
+                already_read_count = len(source_papers) - len(unread_papers)
+                if not unread_papers:
+                    st.info("All selected sources already have Gemini reading notes. No duplicate Gemini reading was run.")
+                    read_papers = source_papers
+                else:
+                    with st.spinner("Gemini is reading only sources without existing Gemini notes..."):
+                        newly_read = gemini_read_selected_papers(
+                            unread_papers,
+                            context_text,
+                            st.session_state.gemini_key,
+                            st.session_state.gemini_model,
+                            current_style_profile(),
+                        )
+                    newly_read_by_id = {str(item.get("paper_id")): item for item in newly_read}
+                    read_papers = [newly_read_by_id.get(str(paper.get("paper_id")), paper) for paper in source_papers]
+                if unread_papers:
                     st.session_state.gemini_recommendations = summarize_gemini_reference_notes(
                         read_papers,
                         context_text,
@@ -1689,7 +1691,11 @@ with tabs[3]:
                     st.session_state.paper_search["papers"] = [
                         by_id.get(str(paper.get("paper_id")), paper) for paper in st.session_state.paper_search["papers"]
                     ]
-                st.success(f"Gemini read {len(read_papers)} selected source(s).")
+                if unread_papers:
+                    st.success(
+                        f"Gemini read {len(unread_papers)} new source(s); "
+                        f"{already_read_count} already-read source(s) were skipped."
+                    )
 
         recommendations = st.session_state.get("gemini_recommendations") or {}
         if recommendations:
