@@ -401,7 +401,7 @@ EVIDENCE_SECTION_ORDER = ["Introduction", "Methodology", "Discussion", "Other"]
 SOURCE_TYPE_SECTIONS = [
     ("Research papers", "Research Article", "research_papers"),
     ("Review papers", "Review Paper", "review_papers"),
-    ("Theses / RoL mining", "Thesis", "thesis_sources"),
+    ("Theses / source mining", "Thesis", "thesis_sources"),
 ]
 
 METHODOLOGY_SOURCE_TYPE_SECTIONS = [
@@ -454,7 +454,7 @@ def methodology_allows_source_type(source_type: str) -> bool:
 def citation_policy_for_category(category: str) -> str:
     source_type = source_type_from_category(category)
     if source_type == "Thesis":
-        return "Mine the Review of Literature and bibliography for original studies; do not cite the thesis directly unless unavoidable."
+        return "Mine thesis source sections and bibliography for original studies; do not cite the thesis directly unless unavoidable."
     if source_type == "Review Paper":
         return "Use for synthesis, mechanisms, and bibliography mining; cite the review only for broad framing."
     return "Use as a direct primary citation when it matches the finding, method, or claim."
@@ -564,7 +564,7 @@ def fallback_evidence_need(section: str, category: str) -> str:
     source_type = source_type_from_category(category)
     if section == "Introduction":
         if source_type == "Thesis":
-            return "Find RoL leads for crop/pest importance, damage history, and research-gap support."
+            return "Mine thesis Introduction/background/problem statement and bibliography for crop importance, pest status, damage, regional context, and research-gap support."
         if source_type == "Review Paper":
             return "Support broad background, pest importance, distribution, and knowledge-gap framing."
         return "Support crop/pest importance, damage/yield-loss evidence, and objective justification."
@@ -584,6 +584,8 @@ def fallback_evidence_need(section: str, category: str) -> str:
 def fallback_extract_target(section: str, category: str) -> str:
     source_type = source_type_from_category(category)
     if source_type == "Thesis":
+        if section == "Introduction":
+            return "Thesis Introduction/background notes, objective/gap framing, and bibliography leads to original papers."
         return "Review of Literature chronology, objective/result matches, and bibliography leads to original papers."
     if source_type == "Review Paper":
         return "Mechanisms, synthesis statements, evidence gaps, and original references worth searching again."
@@ -597,6 +599,8 @@ def fallback_extract_target(section: str, category: str) -> str:
 def fallback_writing_use(section: str, category: str) -> str:
     source_type = source_type_from_category(category)
     if source_type == "Thesis":
+        if section == "Introduction":
+            return "Use thesis Introduction/background and bibliography leads to strengthen the Introduction; keep thesis itself outside final references unless necessary."
         return f"Use mined original studies to strengthen the {section}; keep thesis itself outside final references unless necessary."
     if source_type == "Review Paper":
         return f"Use for {section} synthesis and to locate primary studies for final citation."
@@ -1697,7 +1701,7 @@ with tabs[2]:
                         if (paper.get("category") == "Thesis" and not include_in_final_references(paper))
                     ]
                     if skipped_theses:
-                        st.caption(f"{len(skipped_theses)} thesis source(s) are used for RoL/reference mining only and are not shown as final citations.")
+                        st.caption(f"{len(skipped_theses)} thesis source(s) are used for source mining only and are not shown as final citations.")
 
 
 with tabs[3]:
@@ -1847,7 +1851,7 @@ with tabs[3]:
 
             primary_leads = recommendations.get("thesis_primary_study_leads") or []
             if primary_leads:
-                with st.expander("Primary-study leads extracted from thesis RoL", expanded=True):
+                with st.expander("Primary-study leads extracted from thesis source sections", expanded=True):
                     for lead in primary_leads[:30]:
                         st.write(lead)
                 rol_queries = thesis_primary_study_search_queries(
@@ -1855,12 +1859,12 @@ with tabs[3]:
                     current_context_text(inputs, extracted_files),
                 )
                 if rol_queries:
-                    with st.expander("Primary-paper search queries from thesis RoL", expanded=False):
+                    with st.expander("Primary-paper search queries from thesis source leads", expanded=False):
                         for query in rol_queries:
                             st.code(query, language="text")
-                    if st.button("Search original papers from thesis RoL leads now", type="primary", width="stretch"):
+                    if st.button("Search original papers from thesis source leads now", type="primary", width="stretch"):
                         context_text = current_context_text(inputs, extracted_files)
-                        with st.spinner("Searching original primary papers named or implied in thesis RoL sections..."):
+                        with st.spinner("Searching original primary papers named or implied in thesis source sections..."):
                             extra_search = search_and_rank_papers(
                                 queries=rol_queries,
                                 context_text=context_text,
@@ -1897,7 +1901,7 @@ with tabs[3]:
                             if str(item.get("paper_id")) in selected_ids
                         ]
                         st.success(
-                            f"Merged thesis-RoL primary-paper search. Selected {len(st.session_state.selected_papers)} sources."
+                            f"Merged thesis source-lead primary-paper search. Selected {len(st.session_state.selected_papers)} sources."
                         )
 
             gaps = recommendations.get("coverage_gaps") or []
@@ -2015,9 +2019,11 @@ with tabs[3]:
             if paper.get("category") == "Thesis" and paper.get("gemini_note")
         ]
         if thesis_notes:
-            with st.expander("Thesis literature-review and bibliography notes", expanded=False):
+            with st.expander("Thesis source-mining notes", expanded=False):
                 for paper, note in thesis_notes:
                     st.markdown(f"**{citation_key(paper)} {paper.get('title', '')}**")
+                    if note.get("thesis_introduction_notes"):
+                        st.write(note["thesis_introduction_notes"])
                     if note.get("review_of_literature_notes"):
                         st.write(note["review_of_literature_notes"])
                     for reference in note.get("most_useful_references", [])[:10]:
@@ -2057,7 +2063,7 @@ with tabs[4]:
             if selected_papers and not any(p.get("download_success") for p in selected_papers):
                 st.warning("Selected references have not been downloaded/read yet; discussion will rely mostly on abstracts.")
             if selected_papers and not any(p.get("gemini_note") for p in selected_papers):
-                st.warning("Run Gemini Reading first for stronger literature matching and thesis-reference extraction.")
+                st.warning("Run Gemini Reading first for stronger literature matching and thesis source-reference extraction.")
             with st.spinner("Writing Results first, planning the style-led Discussion framework, then drafting the full paper..."):
                 try:
                     draft = generate_full_draft(

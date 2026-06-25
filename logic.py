@@ -1971,7 +1971,9 @@ Rules:
 - For Discussion, use the drafted Results and Discussion framework as the primary guide: each query must help explain, validate, contrast, or contextualize a finding.
 - Prefer original primary research papers for direct result comparisons and final citation.
 - Use review papers for broad synthesis, mechanism, framing, and finding original bibliography leads.
-- Use theses only for RoL/source-mining queries, especially Krishikosh-style Indian theses; do not plan to cite the thesis itself unless no primary source is available.
+- Use theses only for source-mining queries, especially Krishikosh-style Indian theses; do not plan to cite the thesis itself unless no primary source is available.
+- For Introduction thesis use, focus on thesis introduction/background/problem statement and bibliography, not RoL.
+- For Discussion thesis use, RoL mining is allowed.
 - Queries must include crop/host, pest/pathogen/organism, treatment/method, measured response, geography, or system terms when known.
 - Avoid generic topic-only queries.
 - Do not generate search queries using statistical tests or experimental designs.
@@ -1988,7 +1990,7 @@ introduction_search_queries: array of 3-5 precise scholarly search queries;
 methodology_search_queries: array of 0-3 precise scholarly search queries only for named/specific method-citation needs;
 discussion_search_queries: array of {max_queries} precise scholarly search queries;
 review_mining_queries: array of 2-4 review-paper mining queries;
-thesis_mining_queries: array of 2-4 thesis/RoL mining queries;
+thesis_mining_queries: array of 2-4 thesis source-mining queries;
 query_rationale: array of objects with query, target_evidence, why_this_query;
 missing_evidence_questions: array of brief questions the app should answer through search or reading.
 """
@@ -3895,6 +3897,7 @@ def gemini_mine_pdf_images_for_source_text(
     model: str,
     category: str,
     context_text: str = "",
+    evidence_section: str = "",
 ) -> str:
     if not api_key or fitz is None or not pdf_path or not Path(pdf_path).exists():
         return ""
@@ -3909,6 +3912,28 @@ def gemini_mine_pdf_images_for_source_text(
 
     batch_size = max(1, min(6, GEMINI_PDF_IMAGE_BATCH_SIZE))
     mined_parts: list[str] = []
+    section_lower = str(evidence_section or "").strip().lower()
+    category_lower = str(category or "").strip().lower()
+    if "thesis" in category_lower and section_lower == "introduction":
+        mining_task = """
+- For theses selected for the Introduction, do not prioritize the Review of Literature.
+- Focus on visible thesis Introduction/background/problem statement/objectives/rationale pages and references/bibliography.
+- Extract crop importance, pest/problem status, damage/yield-loss statements, distribution/occurrence, regional context,
+  research gap, and original author-year/title/reference leads supporting those Introduction claims.
+- If a bibliography/reference entry supports an Introduction claim, capture it as a searchable primary-study lead.
+""".strip()
+    elif "thesis" in category_lower:
+        mining_task = """
+- For theses selected outside the Introduction, focus on Review of Literature/Literature Review/Chapter II and references/bibliography.
+- Extract chronological author-year study leads, original paper titles if visible, crop/pest/context, methods/treatments,
+  key findings, and bibliography entries that can be searched again.
+""".strip()
+    else:
+        mining_task = """
+- If these pages contain review synthesis, references, bibliography, or literature cited, extract original author-year study leads,
+  paper titles if visible, crop/pest/context, methods/treatments, key findings, and searchable bibliography entries.
+- If these pages are front matter, introduction, methods, or irrelevant pages, extract only useful citation/source-mining clues.
+""".strip()
     for start in range(0, len(rendered_pages), batch_size):
         batch = rendered_pages[start : start + batch_size]
         page_numbers = ", ".join(str(page_number) for page_number, _image in batch)
@@ -3917,16 +3942,14 @@ You are reading page images from a downloaded scholarly PDF because normal PDF t
 Use only visible text in these page images. Do not invent authors, years, titles, findings, or references.
 
 Source category: {category}
+Evidence section planned in the app: {evidence_section or "not specified"}
 Current research context:
 {truncate_text(context_text, 2500)}
 
 Pages in this batch: {page_numbers}
 
 Task:
-- If these pages contain Review of Literature, Literature Review, Chapter II, references, bibliography, or literature cited,
-  extract author-year study leads, original paper titles if visible, crop/pest/context, methods/treatments, key findings,
-  and bibliography entries that can be searched again.
-- If these pages are front matter, introduction, methods, or irrelevant pages, extract only useful citation/source-mining clues.
+{mining_task}
 - Clearly include page numbers with each extracted clue.
 - Keep output concise but information-rich.
 """
@@ -3968,6 +3991,15 @@ def extract_literature_review_section(text: str, limit: int = 16000) -> str:
     )
 
 
+def extract_thesis_introduction_section(text: str, limit: int = 16000) -> str:
+    return extract_section_between_markers(
+        text,
+        ["chapter i", "chapter 1", "\nintroduction", " introduction"],
+        ["review of literature", "literature review", "review literature", "chapter ii", "chapter 2", "materials and methods", "methodology"],
+        limit=limit,
+    )
+
+
 def extract_references_section(text: str, limit: int = 14000) -> str:
     if not text:
         return ""
@@ -3990,9 +4022,11 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "methodology_links": [],
         "result_links": [],
         "discussion_points": [],
+        "thesis_introduction_notes": "",
         "review_of_literature_notes": "",
         "reference_list_notes": "",
         "most_useful_references": [],
+        "introduction_reference_leads": [],
         "rol_primary_studies": [],
         "primary_study_leads": [],
         "thesis_citation_policy": "do_not_cite_thesis_directly" if category == "Thesis" else "",
@@ -4024,6 +4058,7 @@ def gemini_read_reference(
 ) -> dict[str, Any]:
     enriched = dict(paper)
     category = enriched.get("category") or infer_paper_category(enriched)
+    evidence_section = str(enriched.get("evidence_section") or "").strip()
     full_text = enriched.get("full_text") or ""
     abstract = enriched.get("abstract") or ""
     evidence_source = "downloaded_full_text" if full_text else "abstract_and_metadata_only"
@@ -4049,6 +4084,7 @@ def gemini_read_reference(
             model,
             category,
             context_text,
+            evidence_section=evidence_section,
         )
         if image_mined_text:
             full_text = f"{full_text}\n\nGemini PDF image reading notes:\n{image_mined_text}".strip()
@@ -4060,9 +4096,38 @@ def gemini_read_reference(
                 f"{enriched.get('text_extraction_method', 'low_text')} + Gemini PDF image reading"
             )
 
-    literature_review = extract_literature_review_section(full_text) if category == "Thesis" else ""
+    thesis_introduction = extract_thesis_introduction_section(full_text) if category == "Thesis" else ""
+    literature_review = extract_literature_review_section(full_text) if category == "Thesis" and evidence_section != "Introduction" else ""
     references_section = extract_references_section(full_text) if category in {"Thesis", "Review Paper"} else ""
     readable_text = full_text or abstract
+    if category == "Thesis" and evidence_section == "Introduction":
+        thesis_reading_rule = """
+For theses selected for the Introduction:
+- Treat the thesis as a source-mining document, not as a final citation.
+- Do not focus on the Review of Literature section unless the Introduction/background section is missing.
+- Focus on the thesis Introduction, background, problem statement, objective/rationale, crop importance,
+  pest/problem status, damage/yield-loss statements, distribution/occurrence, regional context, and knowledge gap.
+- Use the thesis bibliography/references to identify the original studies cited for those Introduction/background claims.
+- thesis_introduction_notes must summarize only introduction/background evidence useful for our Introduction.
+- introduction_reference_leads must list original author-year/title/search leads from the thesis Introduction and bibliography.
+- primary_study_leads and most_useful_references should prioritize original studies behind Introduction claims, not the thesis itself.
+- thesis_citation_policy must be "do_not_cite_thesis_directly" unless the thesis contains unique primary data that must be cited.
+- cite_thesis_directly must be false unless direct thesis citation is unavoidable and you explain why in why_relevant.
+""".strip()
+    else:
+        thesis_reading_rule = """
+For theses:
+- Treat the thesis as a source-mining document, not as a final citation.
+- Focus on the Review of Literature section, especially chronological author-year evidence.
+- Extract original primary studies from the RoL that match the current crop/host/pest/problem, objective,
+  treatment/methodology, result pattern, location/weather context, or discussion need.
+- rol_primary_studies must be an array of objects with author_year, objective_or_topic, crop_pest_context,
+  method_or_treatment, key_result, why_it_matches, bibliography_entry_if_found, and search_query_to_find_primary_paper.
+- primary_study_leads must list concise author-year-title/search leads for finding the original papers again.
+- most_useful_references must list primary-source bibliography entries from the thesis bibliography, not the thesis itself.
+- thesis_citation_policy must be "do_not_cite_thesis_directly" unless the thesis contains unique primary data that must be cited.
+- cite_thesis_directly must be false unless direct thesis citation is unavoidable and you explain why in why_relevant.
+""".strip()
 
     prompt = f"""
 You are reading one scholarly source for a research-paper writing app.
@@ -4075,12 +4140,16 @@ Source metadata:
 Citation key: {citation_key(enriched)}
 APA reference: {format_apa_reference(enriched)}
 Category: {category}
+Evidence section planned in the app: {evidence_section or "not specified"}
 Title: {enriched.get("title", "")}
 Abstract:
 {truncate_text(abstract, 2500)}
 
 Full text or available source text:
 {truncate_text(readable_text, 22000)}
+
+Thesis introduction/background section, if detected:
+{truncate_text(thesis_introduction, 16000)}
 
 Thesis review-of-literature section, if detected:
 {truncate_text(literature_review, 16000)}
@@ -4093,24 +4162,15 @@ Selected author writing-style contract to keep in view while reading:
 
 Return only a JSON object with these keys:
 citation, title, category, evidence_source, overall_relevance, why_relevant,
-methodology_links, result_links, discussion_points, review_of_literature_notes,
-reference_list_notes, most_useful_references, rol_primary_studies, primary_study_leads,
+methodology_links, result_links, discussion_points, thesis_introduction_notes,
+review_of_literature_notes, reference_list_notes, most_useful_references,
+introduction_reference_leads, rol_primary_studies, primary_study_leads,
 thesis_citation_policy, cite_thesis_directly, review_synthesis_insights,
 review_primary_studies, review_reference_leads, review_primary_study_leads,
 review_citation_policy, cite_review_directly, usable_citation_sentences,
 shelton_style_use, selected_style_use, missing_evidence_or_data.
 
-For theses:
-- Treat the thesis as a source-mining document, not as a final citation.
-- Focus on the Review of Literature section, especially chronological author-year evidence.
-- Extract original primary studies from the RoL that match the current crop/host/pest/problem, objective,
-  treatment/methodology, result pattern, location/weather context, or discussion need.
-- rol_primary_studies must be an array of objects with author_year, objective_or_topic, crop_pest_context,
-  method_or_treatment, key_result, why_it_matches, bibliography_entry_if_found, and search_query_to_find_primary_paper.
-- primary_study_leads must list concise author-year-title/search leads for finding the original papers again.
-- most_useful_references must list primary-source bibliography entries from the thesis bibliography, not the thesis itself.
-- thesis_citation_policy must be "do_not_cite_thesis_directly" unless the thesis contains unique primary data that must be cited.
-- cite_thesis_directly must be false unless direct thesis citation is unavoidable and you explain why in why_relevant.
+{thesis_reading_rule}
 For review papers:
 - Treat the review as a synthesis source and a bibliography-mining map, not as primary experimental evidence.
 - Extract discussion insights that match our objectives/results into review_synthesis_insights. Each insight should include
@@ -4177,6 +4237,7 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
         category = paper.get("category") or infer_paper_category(paper)
         if category == "Thesis":
             thesis_leads.extend(note.get("most_useful_references") or [])
+            thesis_leads.extend(note.get("introduction_reference_leads") or [])
             thesis_leads.extend(note.get("primary_study_leads") or [])
         elif category == "Review Paper":
             review_insights.extend(note.get("review_synthesis_insights") or [])
@@ -4238,8 +4299,11 @@ treatments, location/weather context, or discussion interpretation.
 Critical thesis rule:
 - Indian theses, including KrishiKosh theses, are source-mining documents here.
 - Do not recommend citing a thesis itself unless it contains unique primary data and cite_thesis_directly is true.
-- Use thesis RoL notes to identify original primary studies, then put those original studies in
-  thesis_primary_study_leads and suggested_search_queries so they can be found and cited as primary sources.
+- For Introduction thesis sources, use thesis_introduction_notes plus the thesis bibliography/reference list to identify
+  original studies for crop importance, pest status, damage/yield loss, distribution, regional context, and research gap.
+- For Discussion thesis sources, use thesis RoL notes to identify original primary studies.
+- Put original studies from thesis Introduction/RoL/bibliography in thesis_primary_study_leads and suggested_search_queries
+  so they can be found and cited as primary sources.
 
 Critical review-paper rule:
 - Use review papers to mine broad discussion insights related to our objectives and results.
@@ -4262,7 +4326,7 @@ Reading notes:
 Return only a JSON object with keys:
 best_references: array of objects with citation, title, category, why_to_use, where_to_use;
 thesis_reference_leads: array of bibliography entries or source leads found inside thesis references;
-thesis_primary_study_leads: array of primary author-year study leads extracted from thesis RoL;
+thesis_primary_study_leads: array of primary author-year study leads extracted from thesis Introduction/RoL/bibliography;
 review_discussion_insights: array of review-derived synthesis insights useful for the Discussion;
 review_reference_leads: array of bibliography entries or source leads found inside review papers;
 review_primary_study_leads: array of primary author-year study leads extracted from review-paper references;
@@ -4334,8 +4398,8 @@ suggested_search_queries: 4 to 8 precise scholarly queries for missing research/
 needed_data_checks: concrete missing data/statistical/method details the user should provide if available;
 why_needed: brief reasons tied to the selected style contract;
 style_plan: ordered plan for introduction, methods, results, discussion, abstract, conclusion.
-When thesis RoL primary-study leads are present, turn the best author-year/title leads into search queries
-for the original papers. Do not plan to cite the thesis itself unless cite_thesis_directly is true.
+When thesis Introduction/RoL/bibliography primary-study leads are present, turn the best author-year/title leads
+into search queries for the original papers. Do not plan to cite the thesis itself unless cite_thesis_directly is true.
 When review-paper bibliography or primary-study leads are present, turn the best leads into search queries
 for the original primary papers. Use review papers for broad synthesis, but plan to cite original papers for
 specific methods, results, and discussion comparisons.
@@ -4591,7 +4655,9 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16) -> str:
                     "methodology_links": gemini_note.get("methodology_links", [])[:5],
                     "result_links": gemini_note.get("result_links", [])[:5],
                     "discussion_points": gemini_note.get("discussion_points", [])[:6],
+                    "thesis_introduction_notes": truncate_text(gemini_note.get("thesis_introduction_notes", ""), 900),
                     "review_of_literature_notes": truncate_text(gemini_note.get("review_of_literature_notes", ""), 900),
+                    "introduction_reference_leads": gemini_note.get("introduction_reference_leads", [])[:10],
                     "most_useful_references": gemini_note.get("most_useful_references", [])[:8],
                     "rol_primary_studies": gemini_note.get("rol_primary_studies", [])[:10],
                     "primary_study_leads": gemini_note.get("primary_study_leads", [])[:10],
@@ -5034,6 +5100,8 @@ Rules:
 - Every paragraph framework item must start from a supplied result/finding.
 - Do not invent citations, author names, years, or unsupported mechanisms.
 - Use thesis and review mined leads only as search/interpretation guidance unless the original primary paper is selected.
+- For Introduction, thesis-mined leads should come from thesis introduction/background/problem statement and bibliography.
+- For Discussion, thesis-mined leads may come from thesis RoL.
 - Make the plan style-led: the rhetorical move should be more than "report finding"; it should frame, validate,
   reconcile, qualify, or extend the finding through related work.
 """
@@ -5175,10 +5243,11 @@ Rules:
 - Explain pest/pathogen/problem severity.
 - Identify the knowledge gap or need for the study.
 - End with a clear objective sentence.
-- Prefer review-paper evidence and thesis review-of-literature notes for locating original studies.
+- Prefer review-paper evidence and thesis introduction/background bibliography notes for locating original studies
+  that support crop importance, pest status, damage, distribution, regional context, and gap framing.
 - Do not cite theses marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY; cite only directly citable selected
-  primary papers or review papers. If a useful study appears only as a thesis RoL lead, mention it as a search need,
-  not as a citation.
+  primary papers or review papers. If a useful study appears only as a thesis source-mining lead, mention it as a
+  search need, not as a citation.
 - Cite review papers for broad background or synthesis only; cite original selected primary papers for specific
   results, methods, and study-to-study comparisons.
 - Cite only selected references. Do not invent citations.
