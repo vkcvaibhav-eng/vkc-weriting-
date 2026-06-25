@@ -1187,6 +1187,565 @@ def fallback_keywords(text: str, limit: int = 12) -> list[str]:
     return [word for word, _ in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:limit]]
 
 
+BAD_QUERY_TERMS = {
+    "paired t test",
+    "paired t-test",
+    "t test",
+    "t-test",
+    "anova",
+    "analysis of variance",
+    "rbd",
+    "rcbd",
+    "crd",
+    "randomized block design",
+    "randomised block design",
+    "completely randomized design",
+    "completely randomised design",
+    "factorial design",
+    "sem",
+    "se m",
+    "cd at 5",
+    "critical difference",
+    "dmrt",
+    "dnmrt",
+    "statistical analysis",
+    "significant difference",
+    "mean comparison",
+    "replication",
+    "replications",
+}
+
+SPECIFIC_METHOD_QUERY_TERMS = {
+    "probit",
+    "finney",
+    "abbott",
+    "henderson",
+    "tilton",
+    "henderson-tilton",
+    "sun shepard",
+    "schneider",
+    "lc50",
+    "ld50",
+    "bioassay",
+    "mortality correction",
+    "yield loss formula",
+    "sampling method",
+    "observation method",
+    "leaf disc",
+    "residue",
+    "toxicity",
+}
+
+WEAK_QUERY_PHRASES = {
+    "vegetable crop pest management",
+    "field study crop pest",
+    "population dynamics pest",
+    "treatment efficacy crop",
+    "integrated pest management crop",
+    "crop field study",
+    "field experiment treatment efficacy",
+    "agricultural field study",
+}
+
+CROP_TERMS = [
+    "okra",
+    "cotton",
+    "brinjal",
+    "eggplant",
+    "chilli",
+    "tomato",
+    "cucumber",
+    "cucurbit",
+    "cowpea",
+    "pigeonpea",
+    "soybean",
+    "groundnut",
+    "castor",
+    "sesame",
+    "mustard",
+    "wheat",
+    "rice",
+    "maize",
+    "sorghum",
+    "pearl millet",
+    "pomegranate",
+    "mango",
+    "banana",
+    "citrus",
+    "rose",
+    "tea",
+]
+
+PEST_COMMON_TERMS = [
+    "red spider mite",
+    "two spotted spider mite",
+    "two-spotted spider mite",
+    "spider mite",
+    "yellow mite",
+    "broad mite",
+    "whitefly",
+    "aphid",
+    "thrips",
+    "jassid",
+    "leafhopper",
+    "fruit borer",
+    "shoot borer",
+    "bollworm",
+    "pod borer",
+    "leaf miner",
+    "mealybug",
+    "scale insect",
+    "stem borer",
+    "armyworm",
+    "diamondback moth",
+    "mite",
+]
+
+NATURAL_ENEMY_TERMS = [
+    "predatory mite",
+    "coccinellid",
+    "ladybird beetle",
+    "lacewing",
+    "parasitoid",
+    "trichogramma",
+    "chrysoperla",
+    "phytoseiulus",
+    "amblyseius",
+    "neoseiulus",
+]
+
+TREATMENT_TERMS = [
+    "propargite",
+    "fenazaquin",
+    "abamectin",
+    "spiromesifen",
+    "bifenazate",
+    "dicofol",
+    "fenpyroximate",
+    "hexythiazox",
+    "etoxazole",
+    "chlorfenapyr",
+    "sulfur",
+    "azadirachtin",
+    "neem",
+    "acaricide",
+    "insecticide",
+    "bioagent",
+    "biopesticide",
+]
+
+RESULT_FAMILY_OUTCOME_TERMS = {
+    "bioefficacy_management": ["bioefficacy", "efficacy", "acaricide efficacy", "pest management", "population reduction"],
+    "crop_loss_yield_loss": ["yield loss", "crop loss", "avoidable yield loss", "damage", "economic loss", "protected unprotected"],
+    "population_dynamics": ["population dynamics", "seasonal incidence", "weather parameters", "standard meteorological week", "temperature", "humidity", "rainfall"],
+    "weather_correlation": ["weather correlation", "temperature", "humidity", "rainfall", "correlation coefficient"],
+    "screening_varietal_reaction": ["resistant varieties", "genotype screening", "varietal reaction", "susceptible"],
+    "economics": ["benefit cost ratio", "economics", "net return", "icbr"],
+    "bioassay_toxicity_lc50": ["lc50", "ld50", "probit analysis", "toxicity", "resistance ratio"],
+    "biological_control_natural_enemy": ["biological control", "predatory potential", "predation", "parasitization"],
+    "survey_occurrence_distribution": ["occurrence", "survey", "distribution", "host plants"],
+    "biology_life_table_mass_multiplication": ["biology", "life table", "developmental period", "fecundity", "mass multiplication", "rearing"],
+    "resistance_monitoring": ["resistance", "resistance monitoring", "resistance ratio", "susceptibility"],
+    "phytotoxicity_safety_compatibility": ["phytotoxicity", "safety", "compatibility", "natural enemy safety"],
+    "general_if_unclear": ["damage", "pest management", "seasonal incidence"],
+}
+
+
+QUERY_VALIDATION_MANUAL_TESTS = [
+    {
+        "case": "crop_loss_yield_loss",
+        "accepted_examples": ["spider mite okra yield loss", "Tetranychus urticae okra crop loss"],
+        "rejected_examples": ["paired t test crop", "randomized block design vegetable crop"],
+    },
+    {
+        "case": "bioefficacy_management",
+        "accepted_examples": ["Tetranychus urticae okra acaricide efficacy", "propargite Tetranychus urticae okra"],
+        "rejected_examples": ["RBD okra field study"],
+    },
+    {
+        "case": "population_dynamics",
+        "accepted_examples": ["spider mite okra population dynamics", "spider mite okra seasonal incidence"],
+        "rejected_examples": ["ANOVA weather crop"],
+    },
+]
+
+
+def normalize_query_key(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace('"', " ").replace("'", " ").lower()).strip()
+
+
+def clean_query_text(query: Any) -> str:
+    if isinstance(query, dict):
+        query = query.get("query") or query.get("search_query") or query.get("title") or ""
+    return re.sub(r"\s+", " ", str(query or "").strip())
+
+
+def term_in_text(term: str, text: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])", text.lower()))
+
+
+def first_matching_term(text: str, terms: list[str]) -> str:
+    text_lower = text.lower()
+    for term in sorted(terms, key=len, reverse=True):
+        if term and term.lower() in text_lower:
+            return term
+    return ""
+
+
+def extract_scientific_name(text: str) -> str:
+    excluded_first_words = {
+        "table",
+        "figure",
+        "result",
+        "analysis",
+        "india",
+        "gujarat",
+        "seasonal",
+        "population",
+        "yield",
+        "crop",
+        "estimation",
+        "bioefficacy",
+        "effect",
+        "evaluation",
+    }
+    for match in re.findall(r"\b([A-Z][a-z]{3,}\s+[a-z]{3,})\b", text or ""):
+        if match.split()[0].lower() not in excluded_first_words:
+            return match
+    tetranychus_hint = re.search(r"\btetranychus\s+[a-z]{3,}\b", text or "", flags=re.IGNORECASE)
+    return tetranychus_hint.group(0) if tetranychus_hint else ""
+
+
+def infer_result_family(text: str) -> str:
+    lower = text.lower()
+    if any(term in lower for term in ["yield loss", "crop loss", "avoidable", "protected", "unprotected", "damage percent"]):
+        return "crop_loss_yield_loss"
+    if any(term in lower for term in ["population dynamics", "seasonal incidence", "standard meteorological week", " smw", "weather parameter"]):
+        return "population_dynamics"
+    if any(term in lower for term in ["weather correlation", "correlation coefficient", "temperature", "humidity", "rainfall"]):
+        return "weather_correlation"
+    if any(term in lower for term in ["bioefficacy", "efficacy", "acaricide", "insecticide", "spray", "treatment"]):
+        return "bioefficacy_management"
+    if any(term in lower for term in ["lc50", "ld50", "probit", "toxicity", "bioassay"]):
+        return "bioassay_toxicity_lc50"
+    if any(term in lower for term in ["screening", "genotype", "varietal", "resistant", "susceptible", "germplasm"]):
+        return "screening_varietal_reaction"
+    if any(term in lower for term in ["benefit cost", "benefit-cost", "net return", "icbr", "economics"]):
+        return "economics"
+    if any(term in lower for term in ["natural enemy", "predator", "predatory", "parasitoid", "parasitization", "biological control"]):
+        return "biological_control_natural_enemy"
+    if any(term in lower for term in ["survey", "occurrence", "distribution", "fauna", "host plant"]):
+        return "survey_occurrence_distribution"
+    if any(term in lower for term in ["life table", "biology", "developmental period", "fecundity", "mass multiplication", "rearing"]):
+        return "biology_life_table_mass_multiplication"
+    if any(term in lower for term in ["resistance monitoring", "resistance ratio", "susceptibility", "resistance"]):
+        return "resistance_monitoring"
+    if any(term in lower for term in ["phytotoxicity", "compatibility", "safety"]):
+        return "phytotoxicity_safety_compatibility"
+    return "general_if_unclear"
+
+
+def extract_treatment_or_factor(analysis: dict[str, Any], text: str) -> str:
+    for value in analysis.get("treatments_variables") or []:
+        for part in re.split(r"[,;/]|\band\b", str(value), flags=re.IGNORECASE):
+            clean = re.sub(r"\([^)]*\)", "", part).strip(" :-")
+            lower = clean.lower()
+            if (
+                2 <= len(clean) <= 60
+                and not any(skip in lower for skip in ["control", "check", "untreated", "replication", "design"])
+                and not first_matching_term(clean, CROP_TERMS)
+            ):
+                return clean
+    return first_matching_term(text, TREATMENT_TERMS)
+
+
+def is_statistical_method_request(text: str) -> bool:
+    lower = text.lower()
+    return any(term in lower for term in ["statistical methodology", "statistical method paper", "statistical-method", "method paper for statistics"])
+
+
+def build_search_intent_profile(analysis: dict[str, Any] | None, master_context: str, result_text: str) -> dict[str, Any]:
+    analysis = analysis or {}
+    supplied_profile = analysis.get("search_intent_profile") if isinstance(analysis.get("search_intent_profile"), dict) else {}
+    combined = "\n".join(
+        [
+            str(analysis.get("generated_title") or ""),
+            str(analysis.get("objective") or ""),
+            " ".join(map(str, analysis.get("keywords") or [])),
+            " ".join(map(str, analysis.get("major_findings") or [])),
+            " ".join(map(str, analysis.get("treatments_variables") or [])),
+            master_context or "",
+            result_text or "",
+        ]
+    )
+    family = supplied_profile.get("result_family") or analysis.get("result_family") or infer_result_family(combined)
+    scientific_name = supplied_profile.get("scientific_name") or extract_scientific_name(combined)
+    common_name = supplied_profile.get("common_name") or first_matching_term(combined, PEST_COMMON_TERMS)
+    crop_or_host = supplied_profile.get("crop_or_host") or first_matching_term(combined, CROP_TERMS)
+    natural_enemy = supplied_profile.get("natural_enemy") or first_matching_term(combined, NATURAL_ENEMY_TERMS)
+    treatment_or_factor = supplied_profile.get("treatment_or_factor") or extract_treatment_or_factor(analysis, combined)
+    pest_or_problem = supplied_profile.get("pest_or_problem") or common_name or scientific_name
+    outcome_terms = list(dict.fromkeys([*(supplied_profile.get("outcome_terms") or []), *RESULT_FAMILY_OUTCOME_TERMS.get(family, [])]))
+    excluded_terms = [term for term in sorted(BAD_QUERY_TERMS) if term_in_text(term, combined)]
+    optional_terms = [
+        term
+        for term in fallback_keywords(combined, 18)
+        if term not in BAD_QUERY_TERMS and term not in {"field", "study", "analysis", "design", "crop", "pest"}
+    ]
+    must_include_terms = [term for term in [crop_or_host, scientific_name or common_name, treatment_or_factor, outcome_terms[0] if outcome_terms else ""] if term]
+    return {
+        "crop_or_host": crop_or_host,
+        "pest_or_problem": pest_or_problem,
+        "scientific_name": scientific_name,
+        "common_name": common_name,
+        "natural_enemy": natural_enemy,
+        "treatment_or_factor": treatment_or_factor,
+        "result_family": family,
+        "outcome_terms": outcome_terms,
+        "excluded_terms": excluded_terms,
+        "must_include_terms": must_include_terms,
+        "optional_terms": optional_terms[:10],
+        "allow_statistical_method_queries": is_statistical_method_request(combined),
+    }
+
+
+def remove_bad_query_terms(query: str, allow_statistical_method: bool = False) -> tuple[str, list[str]]:
+    cleaned = clean_query_text(query)
+    removed: list[str] = []
+    if allow_statistical_method:
+        return cleaned, removed
+    for term in sorted(BAD_QUERY_TERMS, key=len, reverse=True):
+        pattern = rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])"
+        if re.search(pattern, cleaned, flags=re.IGNORECASE):
+            cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+            removed.append(term)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;:-")
+    return cleaned, removed
+
+
+def query_meaningful_tokens(query: str) -> list[str]:
+    generic = {"crop", "pest", "field", "study", "paper", "research", "trial", "experiment", "effect", "analysis", "management"}
+    return [
+        token
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", query.lower())
+        if token not in STOPWORDS and token not in generic and token not in BAD_QUERY_TERMS
+    ]
+
+
+def score_query_quality(query: str, profile: dict[str, Any]) -> float:
+    lower = query.lower()
+    score = 0.0
+    crop = str(profile.get("crop_or_host") or "").lower()
+    pest_values = [
+        str(profile.get("pest_or_problem") or "").lower(),
+        str(profile.get("scientific_name") or "").lower(),
+        str(profile.get("common_name") or "").lower(),
+        str(profile.get("natural_enemy") or "").lower(),
+    ]
+    treatment = str(profile.get("treatment_or_factor") or "").lower()
+    outcome_terms = [str(term).lower() for term in profile.get("outcome_terms") or []]
+    if crop and crop in lower:
+        score += 1.0
+    if any(value and value in lower for value in pest_values) or any(term in lower for term in PEST_COMMON_TERMS):
+        score += 1.0
+    if treatment and treatment in lower:
+        score += 1.0
+    elif any(term in lower for term in TREATMENT_TERMS):
+        score += 0.7
+    if any(term and term in lower for term in outcome_terms):
+        score += 1.0
+    if any(term in lower for term in SPECIFIC_METHOD_QUERY_TERMS):
+        score += 1.2
+    if len(query_meaningful_tokens(query)) >= 4:
+        score += 0.5
+    return round(score, 2)
+
+
+def is_weak_query(query: str, profile: dict[str, Any]) -> bool:
+    lower = normalize_query_key(query)
+    if any(term in lower for term in SPECIFIC_METHOD_QUERY_TERMS) and len(query_meaningful_tokens(query)) >= 2:
+        return False
+    if not lower or len(query_meaningful_tokens(query)) < 3:
+        return True
+    if any(phrase in lower for phrase in WEAK_QUERY_PHRASES):
+        return score_query_quality(query, profile) < 2.0
+    if lower in {"population dynamics pest", "treatment efficacy crop", "integrated pest management", "field study crop"}:
+        return True
+    return False
+
+
+def validate_literature_query(query: Any, profile: dict[str, Any]) -> tuple[bool, str, str, float]:
+    original = clean_query_text(query)
+    allow_stats = bool(profile.get("allow_statistical_method_queries"))
+    cleaned, removed_terms = remove_bad_query_terms(original, allow_stats)
+    if not cleaned:
+        return False, cleaned, f"removed bad/statistical terms only: {', '.join(removed_terms)}", 0.0
+    if is_weak_query(cleaned, profile):
+        reason = "weak or generic query"
+        if removed_terms:
+            reason += f"; removed {', '.join(removed_terms)}"
+        return False, cleaned, reason, score_query_quality(cleaned, profile)
+    score = score_query_quality(cleaned, profile)
+    has_specific_method = any(term in cleaned.lower() for term in SPECIFIC_METHOD_QUERY_TERMS)
+    if score < 2.0 and not has_specific_method:
+        return False, cleaned, "missing two strong biological anchors", score
+    return True, cleaned, "accepted", score
+
+
+def dedupe_queries(queries: list[str], limit: int) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        cleaned = clean_query_text(query)
+        key = normalize_query_key(cleaned)
+        if cleaned and key not in seen:
+            output.append(cleaned)
+            seen.add(key)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def validate_query_list(queries: list[Any], profile: dict[str, Any], limit: int) -> tuple[list[str], dict[str, Any]]:
+    accepted: list[str] = []
+    rejected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for query in queries:
+        ok, cleaned, reason, score = validate_literature_query(query, profile)
+        key = normalize_query_key(cleaned)
+        if ok and key and key not in seen:
+            accepted.append(cleaned)
+            seen.add(key)
+        else:
+            rejected.append({"query": clean_query_text(query), "cleaned_query": cleaned, "reason": reason, "score": score})
+    return accepted[:limit], {
+        "accepted_queries": accepted[:limit],
+        "rejected_queries": rejected,
+        "rejection_reasons": [item["reason"] for item in rejected],
+        "search_intent_profile": profile,
+    }
+
+
+def quote_query_term(term: str) -> str:
+    clean = str(term or "").strip().strip('"')
+    if not clean:
+        return ""
+    if " " in clean:
+        return f'"{clean}"'
+    return clean
+
+
+def make_query(*terms: str) -> str:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        clean = str(term or "").strip()
+        key = clean.lower()
+        if clean and key not in seen:
+            parts.append(quote_query_term(clean))
+            seen.add(key)
+    return " ".join(parts)
+
+
+def build_family_specific_queries(profile: dict[str, Any], limit: int = 12) -> list[str]:
+    crop = profile.get("crop_or_host") or ""
+    pest = profile.get("common_name") or profile.get("pest_or_problem") or ""
+    sci = profile.get("scientific_name") or ""
+    treatment = profile.get("treatment_or_factor") or ""
+    natural_enemy = profile.get("natural_enemy") or ""
+    family = profile.get("result_family") or "general_if_unclear"
+    q: list[str] = []
+    if family == "bioefficacy_management":
+        q.extend([
+            make_query(sci or pest, crop, "acaricide efficacy"),
+            make_query(pest, crop, "bioefficacy"),
+            make_query(treatment, sci or pest, crop),
+            make_query(pest, crop, "pest management"),
+            make_query("acaricide", pest or sci, crop, "yield"),
+        ])
+    elif family == "crop_loss_yield_loss":
+        q.extend([
+            make_query(pest, crop, "yield loss"),
+            make_query(sci, crop, "crop loss"),
+            make_query(pest, crop, "avoidable yield loss"),
+            make_query("protected", "unprotected", crop, pest),
+            make_query(sci or pest, crop, "damage yield"),
+            make_query(pest, crop, "economic loss"),
+        ])
+    elif family == "population_dynamics":
+        q.extend([
+            make_query(sci or pest, crop, "population dynamics"),
+            make_query(pest, crop, "seasonal incidence"),
+            make_query(pest, crop, "weather parameters"),
+            make_query(sci or pest, "temperature humidity rainfall"),
+            make_query(pest, crop, "standard meteorological week"),
+        ])
+    elif family == "weather_correlation":
+        q.extend([
+            make_query(pest, crop, "weather correlation"),
+            make_query(sci or pest, crop, "temperature humidity rainfall"),
+            make_query(pest, crop, "correlation coefficient", "weather"),
+        ])
+    elif family == "screening_varietal_reaction":
+        q.extend([
+            make_query(pest, crop, "resistant varieties"),
+            make_query(sci or pest, crop, "genotype screening"),
+            make_query(pest, crop, "varietal reaction"),
+            make_query(crop, "germplasm screening", pest),
+        ])
+    elif family == "economics":
+        q.extend([
+            make_query(pest, crop, "benefit cost ratio"),
+            make_query(pest, crop, "economics management"),
+            make_query(treatment, crop, pest, "net return"),
+            make_query(crop, pest, "ICBR"),
+        ])
+    elif family == "bioassay_toxicity_lc50":
+        q.extend([
+            make_query(pest or sci, treatment, "LC50"),
+            make_query(sci or pest, "acaricide toxicity", "LC50"),
+            make_query(pest or sci, treatment, "probit analysis"),
+            make_query(pest or sci, "resistance ratio", "acaricide"),
+        ])
+    elif family == "biological_control_natural_enemy":
+        q.extend([
+            make_query(natural_enemy, pest or sci, "biological control"),
+            make_query(natural_enemy, sci or pest, "predatory potential"),
+            make_query(natural_enemy, crop, pest),
+            make_query(pest or sci, crop, "predatory mite"),
+        ])
+    elif family == "survey_occurrence_distribution":
+        q.extend([
+            make_query(pest or sci, crop, "occurrence"),
+            make_query(pest or sci, crop, "survey"),
+            make_query(sci or pest, "distribution", "host plants"),
+            make_query("mite fauna survey", crop),
+        ])
+    elif family == "biology_life_table_mass_multiplication":
+        q.extend([
+            make_query(pest or sci, "biology life table"),
+            make_query(sci or pest, "developmental period fecundity"),
+            make_query(natural_enemy or pest, "mass multiplication"),
+            make_query(natural_enemy or pest, "rearing", pest),
+        ])
+    elif family == "resistance_monitoring":
+        q.extend([
+            make_query(pest or sci, "acaricide resistance"),
+            make_query(sci or pest, "resistance monitoring"),
+            make_query(pest or sci, treatment, "resistance ratio"),
+            make_query(pest or sci, "susceptibility", "acaricide"),
+        ])
+    else:
+        q.extend([
+            make_query(sci or pest, crop, RESULT_FAMILY_OUTCOME_TERMS["general_if_unclear"][0]),
+            make_query(pest or sci, crop, "pest management"),
+            make_query(sci or pest, crop, "seasonal incidence"),
+            make_query(treatment, pest or sci, crop),
+        ])
+    accepted, _report = validate_query_list([query for query in q if query.strip()], profile, limit)
+    return accepted
+
+
 def analyze_research_context(
     api_key: str,
     model: str,
@@ -1197,6 +1756,7 @@ def analyze_research_context(
     result_text: str,
 ) -> dict[str, Any]:
     fallback_title = paper_title.strip() or "Research Paper Draft"
+    profile_seed = {}
     fallback = {
         "generated_title": fallback_title,
         "objective": "",
@@ -1209,8 +1769,19 @@ def analyze_research_context(
         "research_questions": [],
         "discussion_needs": [],
         "search_queries": [],
+        "search_intent_profile": profile_seed,
+        "rejected_query_terms": [],
+        "result_family": "general_if_unclear",
+        "query_quality_report": {},
         "result_summary": truncate_text(result_text, 1200),
     }
+    fallback["search_intent_profile"] = build_search_intent_profile(
+        fallback,
+        " ".join([paper_title, research_area, master_context, raw_methodology]),
+        result_text,
+    )
+    fallback["result_family"] = fallback["search_intent_profile"].get("result_family", "general_if_unclear")
+    fallback["rejected_query_terms"] = fallback["search_intent_profile"].get("excluded_terms", [])
     if not api_key:
         return fallback
 
@@ -1230,10 +1801,17 @@ Result evidence:
 
 JSON keys:
 generated_title, objective, keywords, treatments_variables, major_findings, significant_differences,
-result_patterns, treatment_rankings, research_questions, discussion_needs, search_queries, result_summary.
+result_patterns, treatment_rankings, research_questions, discussion_needs, search_queries,
+search_intent_profile, rejected_query_terms, result_family, result_summary.
 Use only supplied facts. If title is missing, create a concise scientific title.
 Create 5 to 8 search_queries that will find papers useful for discussion and references.
 The search_queries and discussion_needs must be driven by the actual results, not generic topic coverage.
+Do not include statistical tests, experimental designs, software names, replication, ANOVA, RBD, CRD,
+paired t-test, CD, SEm, DMRT, or broad statistical analysis in literature search queries unless the
+paper topic is statistical methodology.
+search_intent_profile must include crop_or_host, pest_or_problem, scientific_name, common_name,
+natural_enemy, treatment_or_factor, result_family, outcome_terms, excluded_terms, must_include_terms,
+and optional_terms.
 """
     try:
         text = chat_text(
@@ -1247,6 +1825,17 @@ The search_queries and discussion_needs must be driven by the actual results, no
         parsed = parse_json_object(text, fallback)
         for key, value in fallback.items():
             parsed.setdefault(key, value)
+        profile = build_search_intent_profile(
+            parsed,
+            " ".join([paper_title, research_area, master_context, raw_methodology]),
+            result_text,
+        )
+        accepted_queries, report = validate_query_list(parsed.get("search_queries") or [], profile, 8)
+        parsed["search_intent_profile"] = profile
+        parsed["result_family"] = profile.get("result_family", "general_if_unclear")
+        parsed["rejected_query_terms"] = profile.get("excluded_terms", [])
+        parsed["search_queries"] = accepted_queries
+        parsed["query_quality_report"] = report
         return parsed
     except Exception:
         return fallback
@@ -1260,19 +1849,20 @@ def generate_search_queries(
     result_text: str,
     max_queries: int = 6,
 ) -> list[str]:
-    existing = [str(q).strip() for q in analysis.get("search_queries", []) if str(q).strip()]
-    if existing:
-        return existing[:max_queries]
+    profile = build_search_intent_profile(analysis, master_context, result_text)
+    analysis["search_intent_profile"] = profile
+    analysis["result_family"] = profile.get("result_family", "general_if_unclear")
+    template_queries = build_family_specific_queries(profile, max(max_queries + 4, 10))
+    existing = [clean_query_text(q) for q in analysis.get("search_queries", []) if clean_query_text(q)]
+    accepted_existing, existing_report = validate_query_list(existing, profile, max_queries)
+    if len(accepted_existing) >= max_queries:
+        analysis["query_quality_report"] = existing_report
+        return accepted_existing[:max_queries]
 
-    keywords = fallback_keywords(" ".join([master_context, result_text, " ".join(analysis.get("keywords", []))]))
-    fallback = [
-        " ".join(keywords[:5]) + " field study",
-        " ".join(keywords[:4]) + " population dynamics",
-        " ".join(keywords[:4]) + " treatment efficacy",
-        " ".join(keywords[:4]) + " integrated pest management",
-    ]
-    fallback = [query.strip() for query in fallback if query.strip()]
+    fallback = dedupe_queries([*accepted_existing, *template_queries], max_queries)
     if not api_key:
+        _accepted, report = validate_query_list(fallback, profile, max_queries)
+        analysis["query_quality_report"] = report
         return fallback[:max_queries]
 
     prompt = f"""
@@ -1281,6 +1871,8 @@ Create search queries for finding research papers to support the manuscript, mai
 Objective: {analysis.get("objective", "")}
 Findings: {analysis.get("major_findings", [])}
 Keywords: {analysis.get("keywords", [])}
+Search intent profile:
+{json.dumps(profile, ensure_ascii=True)}
 Context: {truncate_text(master_context, 3000)}
 Results: {truncate_text(result_text, 5000)}
 
@@ -1288,6 +1880,9 @@ Return JSON array of {max_queries} short queries.
 Include crop/host, pest/pathogen, treatment, measured response, weather, location, or system terms when known.
 Do not create broad methodology queries for experimental design, RBD/CRD/RCBD, ANOVA, or general statistical analysis.
 Only include methodology terms when they are named/specific method-citation needs such as probit analysis, Finney, Abbott correction, Henderson-Tilton correction, LC50/LD50, bioassay protocol, or a named sampling/observation method.
+Every query must contain at least two strong biological anchors such as crop/host, pest/scientific name,
+treatment/factor, natural enemy, or outcome phrase. Avoid weak queries such as field study crop pest,
+population dynamics pest, treatment efficacy crop, or integrated pest management crop.
 """
     try:
         text = chat_text(
@@ -1297,42 +1892,13 @@ Only include methodology terms when they are named/specific method-citation need
             prompt,
             temperature=0.2,
         )
-        def keep_query(query: str) -> bool:
-            lower = query.lower()
-            specific_terms = [
-                "probit",
-                "finney",
-                "abbott",
-                "henderson",
-                "tilton",
-                "lc50",
-                "ld50",
-                "bioassay",
-                "mortality correction",
-                "yield loss formula",
-                "sampling method",
-                "observation method",
-            ]
-            generic_terms = [
-                "experimental design",
-                "statistical analysis",
-                "anova",
-                "analysis of variance",
-                "randomized block",
-                "randomised block",
-                "rbd",
-                "rcbd",
-                "crd",
-                "replication",
-                "replications",
-            ]
-            if any(term in lower for term in specific_terms):
-                return True
-            return not any(term in lower for term in generic_terms)
-
-        queries = [str(q).strip() for q in parse_json_list(text, fallback) if str(q).strip() and keep_query(str(q))]
+        candidates = [*accepted_existing, *parse_json_list(text, []), *template_queries, *fallback]
+        queries, report = validate_query_list(candidates, profile, max_queries)
+        analysis["query_quality_report"] = report
         return queries[:max_queries] or fallback[:max_queries]
     except Exception:
+        _accepted, report = validate_query_list(fallback, profile, max_queries)
+        analysis["query_quality_report"] = report
         return fallback[:max_queries]
 
 
@@ -1364,6 +1930,7 @@ def generate_claude_discussion_search_plan(
     if not claude_key:
         return fallback
 
+    profile = build_search_intent_profile(analysis, context_text, result_text)
     prompt = f"""
 You are planning the section-wise evidence search for a research paper.
 The Results have priority for Discussion, but Introduction and Methodology need their
@@ -1372,6 +1939,9 @@ explain, compare, contrast, and contextualize the manuscript.
 
 Research analysis:
 {json.dumps(analysis or {}, ensure_ascii=True)[:22000]}
+
+Search intent profile for query design:
+{json.dumps(profile, ensure_ascii=True)[:9000]}
 
 Methodology, research context, and user notes:
 {truncate_text(context_text, 9000)}
@@ -1403,6 +1973,10 @@ Rules:
 - Use theses only for RoL/source-mining queries, especially Krishikosh-style Indian theses; do not plan to cite the thesis itself unless no primary source is available.
 - Queries must include crop/host, pest/pathogen/organism, treatment/method, measured response, geography, or system terms when known.
 - Avoid generic topic-only queries.
+- Do not generate search queries using statistical tests or experimental designs.
+- Do not use RBD, CRD, ANOVA, paired t-test, CD, SEm, DMRT, replication, or statistical analysis as search concepts.
+- Use biological, ecological, agronomic, pest-management, crop-loss, natural-enemy, toxicity, resistance, screening, weather, or economics concepts.
+- Every non-methodology query must contain at least two strong biological anchors: crop/host, pest/scientific name, treatment/factor, natural enemy, or outcome phrase.
 - Make queries that can work in Google Scholar, SerpAPI, Semantic Scholar, ResearchGate public pages, CORE, Perplexity, and thesis repositories.
 - Each section_evidence_plan item must tell the user why that basket exists and what Gemini should extract after download/reading.
 
@@ -1430,68 +2004,15 @@ missing_evidence_questions: array of brief questions the app should answer throu
         for key, value in fallback.items():
             parsed.setdefault(key, value)
         def clean_query_items(items: Any, limit: int) -> list[str]:
-            queries: list[str] = []
-            seen: set[str] = set()
             if not isinstance(items, list):
                 return []
-            for query in items:
-                if isinstance(query, dict):
-                    query = query.get("query") or query.get("search_query") or query.get("title") or ""
-                clean_query = str(query).strip()
-                normalized = re.sub(r"\s+", " ", clean_query.lower())
-                if clean_query and normalized not in seen:
-                    queries.append(clean_query)
-                    seen.add(normalized)
-            return queries[:limit]
-
-        def keep_methodology_query(query: str) -> bool:
-            text = query.lower()
-            specific_terms = [
-                "probit",
-                "finney",
-                "abbott",
-                "henderson",
-                "tilton",
-                "sun shepard",
-                "schneider",
-                "oecd",
-                "bioassay",
-                "lc50",
-                "ld50",
-                "mortality correction",
-                "yield loss formula",
-                "population count method",
-                "sampling method",
-                "leaf disc",
-                "residue",
-                "toxicity",
-                "acaricide",
-                "insecticide",
-                "mites per leaf",
-            ]
-            generic_terms = [
-                "experimental design",
-                "statistical analysis",
-                "anova",
-                "analysis of variance",
-                "randomized block",
-                "randomised block",
-                "rbd",
-                "rcbd",
-                "crd",
-                "replication",
-                "replications",
-                "design of experiment",
-                "statistics",
-            ]
-            if any(term in text for term in specific_terms):
-                return True
-            return not any(term in text for term in generic_terms)
+            accepted, _report = validate_query_list(items, profile, limit)
+            return accepted[:limit]
 
         parsed["introduction_search_queries"] = clean_query_items(parsed.get("introduction_search_queries"), 5)
         parsed["methodology_search_queries"] = [
-            query for query in clean_query_items(parsed.get("methodology_search_queries"), 4)
-            if keep_methodology_query(query)
+            query for query in clean_query_items(parsed.get("methodology_search_queries"), 5)
+            if any(term in query.lower() for term in SPECIFIC_METHOD_QUERY_TERMS)
         ][:3]
         parsed["discussion_search_queries"] = clean_query_items(parsed.get("discussion_search_queries"), max_queries)
         parsed["review_mining_queries"] = clean_query_items(parsed.get("review_mining_queries"), 4)
@@ -1502,7 +2023,12 @@ missing_evidence_questions: array of brief questions the app should answer throu
                 continue
             query = str(item.get("query") or item.get("search_query") or "").strip()
             section = str(item.get("section") or "Discussion").strip() or "Discussion"
-            if section.lower().startswith("method") and query and not keep_methodology_query(query):
+            if query:
+                ok, cleaned_query, _reason, _score = validate_literature_query(query, profile)
+                if not ok:
+                    continue
+                query = cleaned_query
+            if section.lower().startswith("method") and query and not any(term in query.lower() for term in SPECIFIC_METHOD_QUERY_TERMS):
                 continue
             evidence_need = str(item.get("evidence_need") or item.get("target_evidence") or "").strip()
             source_type = str(item.get("source_type_needed") or item.get("paper_type") or "").strip()
@@ -2367,36 +2893,25 @@ def build_agri_deep_search_queries(
     max_thesis_queries: int = 5,
     max_review_queries: int = 3,
 ) -> dict[str, list[str]]:
-    keywords = fallback_keywords(context_text)
-    seed = " ".join(keywords[:6]) or "agricultural field study"
+    profile = build_search_intent_profile({}, context_text, "")
+    strong_base, _base_report = validate_query_list(base_queries, profile, max(8, len(base_queries) or 4))
+    if not strong_base:
+        strong_base = build_family_specific_queries(profile, 8)
+    family_queries = build_family_specific_queries(profile, 10)
+    journal_seed = dedupe_queries([*strong_base, *family_queries], max_journal_queries)
+
+    def source_queries(source_terms: list[str], limit: int) -> list[str]:
+        candidates = []
+        for query in [*strong_base, *family_queries]:
+            for source_term in source_terms:
+                candidates.append(f"{query} {source_term}".strip())
+        accepted, _report = validate_query_list(candidates, profile, limit)
+        return accepted[:limit]
+
     fallback = {
-        "journal_queries": unique_query_list(
-            list(base_queries)
-            + [
-                f"{seed} field experiment treatment efficacy",
-                f"{seed} population dynamics integrated pest management",
-            ],
-            max_journal_queries,
-        ),
-        "thesis_queries": unique_query_list(
-            [
-                f"{seed} thesis dissertation agricultural university",
-                f"{seed} KrishiKosh Shodhganga thesis",
-                f"{seed} MSc PhD thesis pest management",
-                f"{seed} Indian agricultural university dissertation",
-            ]
-            + [f"{query} thesis dissertation KrishiKosh Shodhganga" for query in base_queries],
-            max_thesis_queries,
-        ),
-        "review_queries": unique_query_list(
-            [
-                f"{seed} review paper",
-                f"{seed} systematic review",
-                f"{seed} integrated pest management review",
-            ]
-            + [f"{query} review paper" for query in base_queries],
-            max_review_queries,
-        ),
+        "journal_queries": journal_seed,
+        "thesis_queries": source_queries(["thesis dissertation", "KrishiKosh Shodhganga thesis", "Indian agricultural university dissertation"], max_thesis_queries),
+        "review_queries": source_queries(["review", "review paper"], max_review_queries),
     }
     if not openai_key:
         return fallback
@@ -2404,11 +2919,14 @@ def build_agri_deep_search_queries(
     prompt = f"""
 Generate independent search-query layers for an agricultural research-paper evidence search.
 
+Search intent profile:
+{json.dumps(profile, ensure_ascii=True)}
+
 Research context:
 {truncate_text(context_text, 9000)}
 
 Base queries:
-{json.dumps(base_queries, ensure_ascii=True)}
+{json.dumps(strong_base, ensure_ascii=True)}
 
 Return only a JSON object with:
 journal_queries: {max_journal_queries} technical queries for journal/research articles;
@@ -2416,6 +2934,11 @@ thesis_queries: {max_thesis_queries} broad thesis/dissertation queries for India
 review_queries: {max_review_queries} queries for review papers.
 
 Do not include site: operators. Keep each query short and searchable.
+Do not use statistical tests or experimental design terms as search concepts.
+Never create weak queries such as paired t test crop, ANOVA crop experiment, RBD insecticide trial,
+statistical analysis vegetable crop, treatment efficacy crop, or integrated pest management crop.
+First make the biological query strong using crop/host, pest/scientific name, treatment/factor, natural enemy,
+and outcome; then add review, thesis, KrishiKosh, or dissertation modifiers.
 """
     try:
         text = chat_text(
@@ -2427,19 +2950,25 @@ Do not include site: operators. Keep each query short and searchable.
             response_format={"type": "json_object"},
         )
         parsed = parse_json_object(text, {})
+        journal_queries, _journal_report = validate_query_list(
+            [*query_items(parsed.get("journal_queries")), *fallback["journal_queries"]],
+            profile,
+            max_journal_queries,
+        )
+        thesis_queries, _thesis_report = validate_query_list(
+            [*query_items(parsed.get("thesis_queries")), *fallback["thesis_queries"]],
+            profile,
+            max_thesis_queries,
+        )
+        review_queries, _review_report = validate_query_list(
+            [*query_items(parsed.get("review_queries")), *fallback["review_queries"]],
+            profile,
+            max_review_queries,
+        )
         return {
-            "journal_queries": unique_query_list(
-                [*query_items(parsed.get("journal_queries")), *fallback["journal_queries"]],
-                max_journal_queries,
-            ),
-            "thesis_queries": unique_query_list(
-                [*query_items(parsed.get("thesis_queries")), *fallback["thesis_queries"]],
-                max_thesis_queries,
-            ),
-            "review_queries": unique_query_list(
-                [*query_items(parsed.get("review_queries")), *fallback["review_queries"]],
-                max_review_queries,
-            ),
+            "journal_queries": journal_queries or fallback["journal_queries"],
+            "thesis_queries": thesis_queries or fallback["thesis_queries"],
+            "review_queries": review_queries or fallback["review_queries"],
         }
     except Exception:
         return fallback

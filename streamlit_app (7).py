@@ -1316,6 +1316,22 @@ with tabs[2]:
             with st.expander("Search queries from Results and section-wise evidence plan", expanded=True):
                 for query in st.session_state.queries:
                     st.code(query, language="text")
+            query_report = (analysis_state.get("query_quality_report") or {}) if analysis_state else {}
+            if query_report:
+                with st.expander("Search query quality check", expanded=False):
+                    profile = query_report.get("search_intent_profile") or analysis_state.get("search_intent_profile") or {}
+                    if profile:
+                        st.write("Search intent profile")
+                        st.json(profile)
+                    accepted = query_report.get("accepted_queries") or []
+                    if accepted:
+                        st.write("Accepted queries")
+                        for query in accepted:
+                            st.code(query, language="text")
+                    rejected = query_report.get("rejected_queries") or []
+                    if rejected:
+                        st.write("Rejected or cleaned queries")
+                        st.dataframe(pd.DataFrame(rejected), width="stretch", hide_index=True)
         else:
             st.info("Run the analysis above to write Results and create search queries.")
 
