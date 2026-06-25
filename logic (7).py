@@ -3969,6 +3969,9 @@ def gemini_mine_pdf_images_for_source_text(
 - Extract those objective-matched RoL blocks with page numbers, headings if visible, author-year citations, crop/pest/context,
   methods/treatments, key findings, and why the block matches our Discussion need.
 - Include every visible author-year citation in each matched RoL block and paraphrase the full evidence logic of that block.
+- Add a short exact same-word excerpt from the matched RoL block for verification. If the whole matched block is 120 words
+  or fewer, the exact excerpt may contain the whole block; if it is longer, quote only the most diagnostic sentences and
+  mark that the full block was longer.
 - For every visible citation in a matched RoL block, search the visible references/bibliography pages in this batch and capture
   the full bibliography entry if present, plus a search query for the original paper.
 """.strip()
@@ -4072,6 +4075,7 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "most_useful_references": [],
         "introduction_reference_leads": [],
         "objective_matched_rol_extracts": [],
+        "objective_matched_rol_verbatim_excerpts": [],
         "objective_matched_rol_bibliography": [],
         "rol_citation_to_bibliography_map": [],
         "objective_matched_rol_search_queries": [],
@@ -4170,9 +4174,14 @@ For theses:
 - First identify RoL paragraphs/subsections whose objective is closest to our current crop/host/pest/problem, objective,
   treatment/methodology, result pattern, location/weather context, or discussion need.
 - objective_matched_rol_extracts must be an array of objects with rol_heading_or_topic, matched_user_objective_or_result,
-  page_or_location_if_available, cited_author_years, concise_rol_content, why_it_matches_our_discussion, and how_to_use_without_copying.
+  page_or_location_if_available, cited_author_years, short_exact_rol_excerpt, exact_excerpt_word_count,
+  is_exact_excerpt_complete_block, concise_rol_content, why_it_matches_our_discussion, and how_to_use_without_copying.
 - For each matched RoL block, include all visible author-year citations that belong to that objective/topic, not only
   the most recent or most favorable citation.
+- short_exact_rol_excerpt must preserve the thesis wording exactly for verification only. If the whole matched block is
+  120 words or fewer, include the whole block. If the block is longer than 120 words, include only the most relevant
+  exact sentences up to 120 words and set is_exact_excerpt_complete_block to false.
+- objective_matched_rol_verbatim_excerpts must list those same short exact excerpts with page/location and cited_author_years.
 - concise_rol_content should preserve the complete evidence logic of the matched RoL block in paraphrased form:
   objective/topic -> cited studies -> direction of findings -> relevance to our result/discussion.
 - For each objective-matched RoL block, use the thesis bibliography/references to recover the full bibliography entries
@@ -4226,6 +4235,7 @@ citation, title, category, evidence_source, overall_relevance, why_relevant,
 methodology_links, result_links, discussion_points, thesis_introduction_notes,
 review_of_literature_notes, reference_list_notes, most_useful_references,
 introduction_reference_leads, objective_matched_rol_extracts,
+objective_matched_rol_verbatim_excerpts,
 objective_matched_rol_bibliography, rol_citation_to_bibliography_map,
 objective_matched_rol_search_queries, rol_primary_studies, primary_study_leads,
 thesis_citation_policy, cite_thesis_directly, review_synthesis_insights,
@@ -4385,6 +4395,8 @@ Critical thesis rule:
   so they can be found and cited as primary sources.
 - Do not copy thesis RoL wording into the manuscript. The thesis author's RoL is a map for locating and interpreting
   original studies; final writing must paraphrase and cite selected original papers.
+- short_exact_rol_excerpt and objective_matched_rol_verbatim_excerpts are verification-only. Do not reuse those exact
+  words in drafted Introduction, Discussion, or citation sentences.
 
 Critical review-paper rule:
 - Use review papers to mine broad discussion insights related to our objectives and results.
@@ -4755,6 +4767,21 @@ def prioritize_papers_for_reference_context(
     return selected[:limit]
 
 
+def rol_extracts_for_writing_context(extracts: Any, limit: int = 8) -> list[Any]:
+    sanitized = []
+    for extract in extracts or []:
+        if len(sanitized) >= limit:
+            break
+        if isinstance(extract, dict):
+            item = dict(extract)
+            item.pop("short_exact_rol_excerpt", None)
+            item["exact_excerpt_status"] = "omitted_from_writing_context_verification_only"
+            sanitized.append(item)
+        else:
+            sanitized.append(extract)
+    return sanitized
+
+
 def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_section: str = "") -> str:
     rows = []
     for paper in prioritize_papers_for_reference_context(papers, limit, target_section):
@@ -4796,7 +4823,12 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
                     "thesis_introduction_notes": truncate_text(gemini_note.get("thesis_introduction_notes", ""), 900),
                     "review_of_literature_notes": truncate_text(gemini_note.get("review_of_literature_notes", ""), 900),
                     "introduction_reference_leads": gemini_note.get("introduction_reference_leads", [])[:10],
-                    "objective_matched_rol_extracts": gemini_note.get("objective_matched_rol_extracts", [])[:8],
+                    "objective_matched_rol_extracts": rol_extracts_for_writing_context(
+                        gemini_note.get("objective_matched_rol_extracts", []), 8
+                    ),
+                    "objective_matched_rol_verbatim_excerpt_count": len(
+                        gemini_note.get("objective_matched_rol_verbatim_excerpts", []) or []
+                    ),
                     "objective_matched_rol_bibliography": gemini_note.get("objective_matched_rol_bibliography", [])[:10],
                     "rol_citation_to_bibliography_map": gemini_note.get("rol_citation_to_bibliography_map", [])[:10],
                     "objective_matched_rol_search_queries": gemini_note.get("objective_matched_rol_search_queries", [])[:10],
@@ -5248,7 +5280,8 @@ Rules:
 - For Discussion, thesis-mined leads may come from thesis RoL.
 - For Discussion thesis RoL mining, give highest value to objective_matched_rol_extracts and
   rol_citation_to_bibliography_map because these connect a similar objective/result to the original cited studies.
-- Do not copy thesis RoL wording; use it to choose original studies and shape the comparison logic.
+- Do not copy thesis RoL wording or short_exact_rol_excerpt text; use it to choose original studies and shape the
+  comparison logic.
 - Make the plan style-led: the rhetorical move should be more than "report finding"; it should frame, validate,
   reconcile, qualify, or extend the finding through related work.
 """
@@ -5336,7 +5369,8 @@ Rules:
   original primary papers or review papers that are present as directly citable selected references.
 - When objective_matched_rol_extracts are available, use them to understand which RoL citations match our objective
   and result direction. Cite only the selected original papers recovered from those citations, not the thesis itself.
-- Do not copy the thesis author's RoL sentences into the Discussion; paraphrase the evidence logic in the selected style.
+- Do not copy the thesis author's RoL sentences or short_exact_rol_excerpt text into the Discussion; paraphrase the
+  evidence logic in the selected style.
 - Use review-paper synthesis insights to frame the discussion, but do not use a review as the only support for a
   specific experimental result or method comparison when the original primary paper lead has not been selected/read.
 - If review bibliography leads are present but the original papers are not selected, mention the need cautiously

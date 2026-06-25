@@ -2045,6 +2045,10 @@ with tabs[3]:
                         st.markdown("**Objective-matched RoL extracts**")
                         for extract in note.get("objective_matched_rol_extracts", [])[:8]:
                             st.write(extract)
+                    if note.get("objective_matched_rol_verbatim_excerpts"):
+                        st.markdown("**Short exact RoL excerpts for verification only**")
+                        for excerpt in note.get("objective_matched_rol_verbatim_excerpts", [])[:8]:
+                            st.write(excerpt)
                     if note.get("rol_citation_to_bibliography_map"):
                         st.markdown("**RoL citation to bibliography map**")
                         for mapped_reference in note.get("rol_citation_to_bibliography_map", [])[:12]:
