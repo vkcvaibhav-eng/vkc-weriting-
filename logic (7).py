@@ -1276,7 +1276,7 @@ def generate_search_queries(
         return fallback[:max_queries]
 
     prompt = f"""
-Create search queries for finding research papers to support the discussion section.
+Create search queries for finding research papers to support the manuscript, mainly the Discussion.
 
 Objective: {analysis.get("objective", "")}
 Findings: {analysis.get("major_findings", [])}
@@ -1284,7 +1284,10 @@ Keywords: {analysis.get("keywords", [])}
 Context: {truncate_text(master_context, 3000)}
 Results: {truncate_text(result_text, 5000)}
 
-Return JSON array of {max_queries} short queries. Include crop/host, pest/pathogen, treatment/weather/statistical terms when known.
+Return JSON array of {max_queries} short queries.
+Include crop/host, pest/pathogen, treatment, measured response, weather, location, or system terms when known.
+Do not create broad methodology queries for experimental design, RBD/CRD/RCBD, ANOVA, or general statistical analysis.
+Only include methodology terms when they are named/specific method-citation needs such as probit analysis, Finney, Abbott correction, Henderson-Tilton correction, LC50/LD50, bioassay protocol, or a named sampling/observation method.
 """
     try:
         text = chat_text(
@@ -1294,7 +1297,40 @@ Return JSON array of {max_queries} short queries. Include crop/host, pest/pathog
             prompt,
             temperature=0.2,
         )
-        queries = [str(q).strip() for q in parse_json_list(text, fallback) if str(q).strip()]
+        def keep_query(query: str) -> bool:
+            lower = query.lower()
+            specific_terms = [
+                "probit",
+                "finney",
+                "abbott",
+                "henderson",
+                "tilton",
+                "lc50",
+                "ld50",
+                "bioassay",
+                "mortality correction",
+                "yield loss formula",
+                "sampling method",
+                "observation method",
+            ]
+            generic_terms = [
+                "experimental design",
+                "statistical analysis",
+                "anova",
+                "analysis of variance",
+                "randomized block",
+                "randomised block",
+                "rbd",
+                "rcbd",
+                "crd",
+                "replication",
+                "replications",
+            ]
+            if any(term in lower for term in specific_terms):
+                return True
+            return not any(term in lower for term in generic_terms)
+
+        queries = [str(q).strip() for q in parse_json_list(text, fallback) if str(q).strip() and keep_query(str(q))]
         return queries[:max_queries] or fallback[:max_queries]
     except Exception:
         return fallback[:max_queries]
@@ -1358,7 +1394,9 @@ but Introduction and Methodology must also receive their own reference-finding l
 Rules:
 - Decide what type of paper is needed for each manuscript section before making queries.
 - For Introduction, find references for crop/pest importance, damage/yield loss, distribution, research gap, and objective framing.
-- For Methodology, find references for method justification, experimental design, observation method, treatment/material choice, sampling, and statistics.
+- For Methodology, do not make broad queries for experimental design, RBD/CRD/RCBD, replications, ANOVA, or general statistical analysis. The methodology is already supplied by the user.
+- For Methodology, make queries only for specific citation/correction needs: named formulas, protocols, bioassay methods, mortality/yield-loss correction methods, probit analysis, LC50/LD50 analysis, or original/foundational method references such as Finney for probit analysis.
+- Methodology references should be original or foundational wherever possible, not generic recent papers that merely used the method.
 - For Discussion, use the drafted Results and Discussion framework as the primary guide: each query must help explain, validate, contrast, or contextualize a finding.
 - Prefer original primary research papers for direct result comparisons and final citation.
 - Use review papers for broad synthesis, mechanism, framing, and finding original bibliography leads.
@@ -1372,7 +1410,7 @@ Return only a JSON object with keys:
 needed_paper_types: array of objects with finding, paper_type, why_needed;
 section_evidence_plan: array of objects with section, evidence_need, source_type_needed, query, why_needed, direct_citation_policy, what_to_extract, writing_use;
 introduction_search_queries: array of 3-5 precise scholarly search queries;
-methodology_search_queries: array of 2-4 precise scholarly search queries;
+methodology_search_queries: array of 0-3 precise scholarly search queries only for named/specific method-citation needs;
 discussion_search_queries: array of {max_queries} precise scholarly search queries;
 review_mining_queries: array of 2-4 review-paper mining queries;
 thesis_mining_queries: array of 2-4 thesis/RoL mining queries;
@@ -1406,8 +1444,55 @@ missing_evidence_questions: array of brief questions the app should answer throu
                     seen.add(normalized)
             return queries[:limit]
 
+        def keep_methodology_query(query: str) -> bool:
+            text = query.lower()
+            specific_terms = [
+                "probit",
+                "finney",
+                "abbott",
+                "henderson",
+                "tilton",
+                "sun shepard",
+                "schneider",
+                "oecd",
+                "bioassay",
+                "lc50",
+                "ld50",
+                "mortality correction",
+                "yield loss formula",
+                "population count method",
+                "sampling method",
+                "leaf disc",
+                "residue",
+                "toxicity",
+                "acaricide",
+                "insecticide",
+                "mites per leaf",
+            ]
+            generic_terms = [
+                "experimental design",
+                "statistical analysis",
+                "anova",
+                "analysis of variance",
+                "randomized block",
+                "randomised block",
+                "rbd",
+                "rcbd",
+                "crd",
+                "replication",
+                "replications",
+                "design of experiment",
+                "statistics",
+            ]
+            if any(term in text for term in specific_terms):
+                return True
+            return not any(term in text for term in generic_terms)
+
         parsed["introduction_search_queries"] = clean_query_items(parsed.get("introduction_search_queries"), 5)
-        parsed["methodology_search_queries"] = clean_query_items(parsed.get("methodology_search_queries"), 4)
+        parsed["methodology_search_queries"] = [
+            query for query in clean_query_items(parsed.get("methodology_search_queries"), 4)
+            if keep_methodology_query(query)
+        ][:3]
         parsed["discussion_search_queries"] = clean_query_items(parsed.get("discussion_search_queries"), max_queries)
         parsed["review_mining_queries"] = clean_query_items(parsed.get("review_mining_queries"), 4)
         parsed["thesis_mining_queries"] = clean_query_items(parsed.get("thesis_mining_queries"), 4)
@@ -1417,6 +1502,8 @@ missing_evidence_questions: array of brief questions the app should answer throu
                 continue
             query = str(item.get("query") or item.get("search_query") or "").strip()
             section = str(item.get("section") or "Discussion").strip() or "Discussion"
+            if section.lower().startswith("method") and query and not keep_methodology_query(query):
+                continue
             evidence_need = str(item.get("evidence_need") or item.get("target_evidence") or "").strip()
             source_type = str(item.get("source_type_needed") or item.get("paper_type") or "").strip()
             plan_items.append(

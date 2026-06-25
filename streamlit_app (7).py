@@ -431,24 +431,69 @@ def citation_policy_for_category(category: str) -> str:
     return "Use as a direct primary citation when it matches the finding, method, or claim."
 
 
+def keep_methodology_query(query: str) -> bool:
+    text = normalize_match_text(query)
+    specific_terms = [
+        "probit",
+        "finney",
+        "abbott",
+        "henderson",
+        "tilton",
+        "sun shepard",
+        "schneider",
+        "bioassay",
+        "lc50",
+        "ld50",
+        "mortality correction",
+        "yield loss formula",
+        "population count method",
+        "sampling method",
+        "leaf disc",
+        "residue",
+        "toxicity",
+        "acaricide",
+        "insecticide",
+        "mites per leaf",
+        "method citation",
+        "original method",
+    ]
+    generic_terms = [
+        "experimental design",
+        "statistical analysis",
+        "anova",
+        "analysis of variance",
+        "randomized block",
+        "randomised block",
+        "rbd",
+        "rcbd",
+        "crd",
+        "replication",
+        "replications",
+        "design of experiment",
+        "statistics",
+    ]
+    if any(term in text for term in specific_terms):
+        return True
+    return not any(term in text for term in generic_terms)
+
+
 def infer_evidence_section_from_text(text: str, category: str = "") -> str:
     combined = normalize_match_text(f"{text} {category}")
     methodology_terms = [
         "method",
         "materials",
-        "design",
-        "rcbd",
-        "rbd",
-        "crd",
-        "replication",
-        "sampling",
-        "observation",
-        "statistical",
-        "analysis",
+        "protocol",
         "formula",
+        "observation",
+        "probit",
+        "finney",
+        "abbott",
+        "henderson",
+        "tilton",
+        "bioassay",
+        "lc50",
+        "ld50",
         "estimation",
-        "spray",
-        "treatment",
     ]
     introduction_terms = [
         "importance",
@@ -496,10 +541,10 @@ def fallback_evidence_need(section: str, category: str) -> str:
         return "Support crop/pest importance, damage/yield-loss evidence, and objective justification."
     if section == "Methodology":
         if source_type == "Thesis":
-            return "Mine methods used in similar Indian agricultural thesis work for comparable design and observations."
+            return "Mine only named method/protocol citation leads from similar thesis work; avoid broad design or statistics references."
         if source_type == "Review Paper":
-            return "Locate accepted measurement, observation, or analytical conventions."
-        return "Justify experimental method, treatment choice, sampling, observations, and statistical approach."
+            return "Use only when it identifies an original method, formula, protocol, or correction reference."
+        return "Find original/foundational citations for specific named methods, formulas, bioassays, corrections, or analyses such as Finney for probit; do not search generic design/statistics."
     if source_type == "Thesis":
         return "Mine Review of Literature and references for original studies that explain or compare with our Results."
     if source_type == "Review Paper":
@@ -514,7 +559,7 @@ def fallback_extract_target(section: str, category: str) -> str:
     if source_type == "Review Paper":
         return "Mechanisms, synthesis statements, evidence gaps, and original references worth searching again."
     if section == "Methodology":
-        return "Design, treatment/material details, observation method, sampling unit, timing, and statistics."
+        return "Named method/protocol details, original author/year, exact formula or correction, and citation wording; avoid generic experimental design/statistical-analysis summaries."
     if section == "Introduction":
         return "Crop/pest importance, damage level, distribution, research gap, and objective framing evidence."
     return "Comparable finding, direction of agreement/disagreement, mechanism, citation details, and implication."
@@ -540,11 +585,16 @@ def collect_plan_queries(claude_plan: dict) -> list[str]:
     ]:
         for query in claude_plan.get(key) or []:
             clean_query = clean_query_text(query)
+            if key == "methodology_search_queries" and not keep_methodology_query(clean_query):
+                continue
             if clean_query:
                 queries.append(clean_query)
     for item in claude_plan.get("section_evidence_plan") or []:
         if isinstance(item, dict):
             clean_query = clean_query_text(item.get("query") or item.get("search_query"))
+            section = normalize_evidence_section(item.get("section"))
+            if section == "Methodology" and clean_query and not keep_methodology_query(clean_query):
+                continue
             if clean_query:
                 queries.append(clean_query)
     return queries
@@ -560,6 +610,8 @@ def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] |
             continue
         query = clean_query_text(item.get("query") or item.get("search_query"))
         section = normalize_evidence_section(item.get("section"))
+        if section == "Methodology" and query and not keep_methodology_query(query):
+            continue
         source_type = normalize_source_type(item.get("source_type_needed") or item.get("paper_type"))
         evidence_need = str(item.get("evidence_need") or item.get("target_evidence") or fallback_evidence_need(section, source_type)).strip()
         items.append(
@@ -591,6 +643,8 @@ def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] |
         for query in query_group:
             clean_query = clean_query_text(query)
             if not clean_query:
+                continue
+            if section == "Methodology" and not keep_methodology_query(clean_query):
                 continue
             items.append(
                 {
@@ -734,6 +788,7 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
         rows.append(
             {
                 "selected": bool(paper.get("selected")),
+                "title": paper.get("title", ""),
                 "rank": index + 1,
                 "score": paper.get("score", 0),
                 "section": paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", "")),
@@ -749,7 +804,6 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
                 "pdf": "yes" if paper.get("pdf_url") or paper.get("pdf_urls") else "",
                 "full_text_chars": paper.get("full_text_chars", 0),
                 "source": paper.get("source", ""),
-                "title": paper.get("title", ""),
                 "reason": paper.get("score_reason", ""),
                 "found_query": paper.get("found_query") or paper.get("query", ""),
                 "paper_id": paper.get("paper_id", ""),
@@ -759,6 +813,7 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
 
 
 PAPER_TABLE_DISABLED_COLUMNS = [
+    "title",
     "rank",
     "score",
     "section",
@@ -774,7 +829,6 @@ PAPER_TABLE_DISABLED_COLUMNS = [
     "pdf",
     "full_text_chars",
     "source",
-    "title",
     "reason",
     "found_query",
     "paper_id",
@@ -787,7 +841,10 @@ def paper_selection_editor(papers: list[dict], key: str) -> pd.DataFrame:
         width="stretch",
         hide_index=True,
         disabled=PAPER_TABLE_DISABLED_COLUMNS,
-        column_config={"selected": st.column_config.CheckboxColumn("Use")},
+        column_config={
+            "selected": st.column_config.CheckboxColumn("Use"),
+            "title": st.column_config.TextColumn("Title", width="large"),
+        },
         key=key,
     )
 
