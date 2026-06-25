@@ -1858,7 +1858,13 @@ with tabs[3]:
                     for lead in thesis_leads[:30]:
                         st.write(lead)
 
-            primary_leads = recommendations.get("thesis_primary_study_leads") or []
+            objective_rol_leads = recommendations.get("objective_matched_rol_leads") or []
+            if objective_rol_leads:
+                with st.expander("Objective-matched thesis RoL leads", expanded=True):
+                    for lead in objective_rol_leads[:30]:
+                        st.write(lead)
+
+            primary_leads = (recommendations.get("thesis_primary_study_leads") or []) + objective_rol_leads
             if primary_leads:
                 with st.expander("Primary-study leads extracted from thesis source sections", expanded=True):
                     for lead in primary_leads[:30]:
@@ -2035,6 +2041,18 @@ with tabs[3]:
                         st.write(note["thesis_introduction_notes"])
                     if note.get("review_of_literature_notes"):
                         st.write(note["review_of_literature_notes"])
+                    if note.get("objective_matched_rol_extracts"):
+                        st.markdown("**Objective-matched RoL extracts**")
+                        for extract in note.get("objective_matched_rol_extracts", [])[:8]:
+                            st.write(extract)
+                    if note.get("rol_citation_to_bibliography_map"):
+                        st.markdown("**RoL citation to bibliography map**")
+                        for mapped_reference in note.get("rol_citation_to_bibliography_map", [])[:12]:
+                            st.write(mapped_reference)
+                    if note.get("objective_matched_rol_bibliography"):
+                        st.markdown("**Bibliography entries from matched RoL citations**")
+                        for bibliography_entry in note.get("objective_matched_rol_bibliography", [])[:12]:
+                            st.write(bibliography_entry)
                     for reference in note.get("most_useful_references", [])[:10]:
                         st.write(reference)
 

@@ -3776,6 +3776,13 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
             seen.add(key)
             queries.append(query[:260])
 
+    def values_as_list(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
     for lead in leads or []:
         if len(queries) >= limit:
             break
@@ -3786,10 +3793,36 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
                 or lead.get("query")
             )
             add_query(explicit)
-            author_year = lead.get("author_year") or lead.get("citation") or lead.get("reference")
-            title = lead.get("title") or lead.get("study_title")
-            topic = lead.get("objective_or_topic") or lead.get("topic") or lead.get("why_it_matches")
-            context = lead.get("crop_pest_context") or lead.get("method_or_treatment") or lead.get("key_result")
+            for explicit_query in values_as_list(lead.get("search_queries")):
+                add_query(explicit_query)
+            author_year = (
+                lead.get("author_year")
+                or lead.get("cited_author_year")
+                or lead.get("citation")
+                or lead.get("reference")
+            )
+            title = lead.get("title") or lead.get("study_title") or lead.get("exact_title_if_found")
+            topic = (
+                lead.get("objective_or_topic")
+                or lead.get("matched_objective_or_result")
+                or lead.get("rol_heading_or_topic")
+                or lead.get("topic")
+                or lead.get("why_it_matches")
+            )
+            context = (
+                lead.get("crop_pest_context")
+                or lead.get("method_or_treatment")
+                or lead.get("key_result")
+                or lead.get("concise_rol_content")
+                or lead.get("why_useful_for_discussion")
+            )
+            bibliography_entry = lead.get("bibliography_entry_if_found") or lead.get("bibliography_entry")
+            if bibliography_entry:
+                add_query(bibliography_entry)
+            for bibliography_entry in values_as_list(lead.get("bibliography_entries")):
+                add_query(bibliography_entry)
+            for cited_author_year in values_as_list(lead.get("cited_author_years")):
+                add_query(f"{cited_author_year} {context_terms} research paper")
             if author_year and title:
                 add_query(f'{author_year} "{title}"')
             if author_year and topic:
@@ -3931,8 +3964,13 @@ def gemini_mine_pdf_images_for_source_text(
     elif "thesis" in category_lower:
         mining_task = """
 - For theses selected outside the Introduction, focus on Review of Literature/Literature Review/Chapter II and references/bibliography.
-- Extract chronological author-year study leads, original paper titles if visible, crop/pest/context, methods/treatments,
-  key findings, and bibliography entries that can be searched again.
+- First find RoL paragraphs/subsections whose objective is closest to the current study, results, crop/host, pest/problem,
+  treatment/factor, or measured response.
+- Extract those objective-matched RoL blocks with page numbers, headings if visible, author-year citations, crop/pest/context,
+  methods/treatments, key findings, and why the block matches our Discussion need.
+- Include every visible author-year citation in each matched RoL block and paraphrase the full evidence logic of that block.
+- For every visible citation in a matched RoL block, search the visible references/bibliography pages in this batch and capture
+  the full bibliography entry if present, plus a search query for the original paper.
 """.strip()
     else:
         mining_task = """
@@ -4033,6 +4071,10 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "reference_list_notes": "",
         "most_useful_references": [],
         "introduction_reference_leads": [],
+        "objective_matched_rol_extracts": [],
+        "objective_matched_rol_bibliography": [],
+        "rol_citation_to_bibliography_map": [],
+        "objective_matched_rol_search_queries": [],
         "rol_primary_studies": [],
         "primary_study_leads": [],
         "thesis_citation_policy": "do_not_cite_thesis_directly" if category == "Thesis" else "",
@@ -4125,8 +4167,21 @@ For theses selected for the Introduction:
 For theses:
 - Treat the thesis as a source-mining document, not as a final citation.
 - Focus on the Review of Literature section, especially chronological author-year evidence.
-- Extract original primary studies from the RoL that match the current crop/host/pest/problem, objective,
+- First identify RoL paragraphs/subsections whose objective is closest to our current crop/host/pest/problem, objective,
   treatment/methodology, result pattern, location/weather context, or discussion need.
+- objective_matched_rol_extracts must be an array of objects with rol_heading_or_topic, matched_user_objective_or_result,
+  page_or_location_if_available, cited_author_years, concise_rol_content, why_it_matches_our_discussion, and how_to_use_without_copying.
+- For each matched RoL block, include all visible author-year citations that belong to that objective/topic, not only
+  the most recent or most favorable citation.
+- concise_rol_content should preserve the complete evidence logic of the matched RoL block in paraphrased form:
+  objective/topic -> cited studies -> direction of findings -> relevance to our result/discussion.
+- For each objective-matched RoL block, use the thesis bibliography/references to recover the full bibliography entries
+  for the cited author-year studies.
+- rol_citation_to_bibliography_map must map cited_author_year to bibliography_entry_if_found, exact_title_if_found,
+  search_query_to_find_original_paper, and confidence.
+- objective_matched_rol_bibliography must list full bibliography entries found for the matched RoL citations.
+- objective_matched_rol_search_queries must list precise queries for finding the original papers behind the matched RoL citations.
+- Do not copy the thesis RoL wording into the manuscript; use it only to locate original studies and understand the comparison logic.
 - rol_primary_studies must be an array of objects with author_year, objective_or_topic, crop_pest_context,
   method_or_treatment, key_result, why_it_matches, bibliography_entry_if_found, and search_query_to_find_primary_paper.
 - primary_study_leads must list concise author-year-title/search leads for finding the original papers again.
@@ -4170,7 +4225,9 @@ Return only a JSON object with these keys:
 citation, title, category, evidence_source, overall_relevance, why_relevant,
 methodology_links, result_links, discussion_points, thesis_introduction_notes,
 review_of_literature_notes, reference_list_notes, most_useful_references,
-introduction_reference_leads, rol_primary_studies, primary_study_leads,
+introduction_reference_leads, objective_matched_rol_extracts,
+objective_matched_rol_bibliography, rol_citation_to_bibliography_map,
+objective_matched_rol_search_queries, rol_primary_studies, primary_study_leads,
 thesis_citation_policy, cite_thesis_directly, review_synthesis_insights,
 review_primary_studies, review_reference_leads, review_primary_study_leads,
 review_citation_policy, cite_review_directly, usable_citation_sentences,
@@ -4236,14 +4293,19 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
             }
         )
     thesis_leads = []
+    objective_rol_leads = []
     review_leads = []
     review_insights = []
     for paper in papers:
         note = paper.get("gemini_note") or {}
         category = paper.get("category") or infer_paper_category(paper)
         if category == "Thesis":
+            objective_rol_leads.extend(note.get("objective_matched_rol_extracts") or [])
+            objective_rol_leads.extend(note.get("rol_citation_to_bibliography_map") or [])
             thesis_leads.extend(note.get("most_useful_references") or [])
             thesis_leads.extend(note.get("introduction_reference_leads") or [])
+            thesis_leads.extend(note.get("objective_matched_rol_bibliography") or [])
+            thesis_leads.extend(note.get("objective_matched_rol_search_queries") or [])
             thesis_leads.extend(note.get("primary_study_leads") or [])
         elif category == "Review Paper":
             review_insights.extend(note.get("review_synthesis_insights") or [])
@@ -4254,6 +4316,7 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
         "best_references": best[:12],
         "thesis_reference_leads": thesis_leads[:20],
         "thesis_primary_study_leads": thesis_leads[:20],
+        "objective_matched_rol_leads": objective_rol_leads[:20],
         "review_discussion_insights": review_insights[:20],
         "review_reference_leads": review_leads[:20],
         "review_primary_study_leads": review_leads[:20],
@@ -4315,8 +4378,13 @@ Critical thesis rule:
 - For Introduction thesis sources, use thesis_introduction_notes plus the thesis bibliography/reference list to identify
   original studies for crop importance, pest status, damage/yield loss, distribution, regional context, and research gap.
 - For Discussion thesis sources, use thesis RoL notes to identify original primary studies.
+- For Discussion thesis sources, prioritize objective_matched_rol_extracts: RoL blocks that match the user's
+  objective/results. Use rol_citation_to_bibliography_map and objective_matched_rol_bibliography to recover full
+  reference entries for the citations inside those blocks.
 - Put original studies from thesis Introduction/RoL/bibliography in thesis_primary_study_leads and suggested_search_queries
   so they can be found and cited as primary sources.
+- Do not copy thesis RoL wording into the manuscript. The thesis author's RoL is a map for locating and interpreting
+  original studies; final writing must paraphrase and cite selected original papers.
 
 Critical review-paper rule:
 - Use review papers to mine broad discussion insights related to our objectives and results.
@@ -4340,6 +4408,7 @@ Return only a JSON object with keys:
 best_references: array of objects with citation, title, category, why_to_use, where_to_use;
 thesis_reference_leads: array of bibliography entries or source leads found inside thesis references;
 thesis_primary_study_leads: array of primary author-year study leads extracted from thesis Introduction/RoL/bibliography;
+objective_matched_rol_leads: array of objects with matched_objective_or_result, cited_author_years, bibliography_entries, search_queries, why_useful_for_discussion;
 review_discussion_insights: array of review-derived synthesis insights useful for the Discussion;
 review_reference_leads: array of bibliography entries or source leads found inside review papers;
 review_primary_study_leads: array of primary author-year study leads extracted from review-paper references;
@@ -4727,6 +4796,10 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
                     "thesis_introduction_notes": truncate_text(gemini_note.get("thesis_introduction_notes", ""), 900),
                     "review_of_literature_notes": truncate_text(gemini_note.get("review_of_literature_notes", ""), 900),
                     "introduction_reference_leads": gemini_note.get("introduction_reference_leads", [])[:10],
+                    "objective_matched_rol_extracts": gemini_note.get("objective_matched_rol_extracts", [])[:8],
+                    "objective_matched_rol_bibliography": gemini_note.get("objective_matched_rol_bibliography", [])[:10],
+                    "rol_citation_to_bibliography_map": gemini_note.get("rol_citation_to_bibliography_map", [])[:10],
+                    "objective_matched_rol_search_queries": gemini_note.get("objective_matched_rol_search_queries", [])[:10],
                     "most_useful_references": gemini_note.get("most_useful_references", [])[:8],
                     "rol_primary_studies": gemini_note.get("rol_primary_studies", [])[:10],
                     "primary_study_leads": gemini_note.get("primary_study_leads", [])[:10],
@@ -5173,6 +5246,9 @@ Rules:
   its evidence actually fits the claim being written.
 - For Introduction, thesis-mined leads should come from thesis introduction/background/problem statement and bibliography.
 - For Discussion, thesis-mined leads may come from thesis RoL.
+- For Discussion thesis RoL mining, give highest value to objective_matched_rol_extracts and
+  rol_citation_to_bibliography_map because these connect a similar objective/result to the original cited studies.
+- Do not copy thesis RoL wording; use it to choose original studies and shape the comparison logic.
 - Make the plan style-led: the rhetorical move should be more than "report finding"; it should frame, validate,
   reconcile, qualify, or extend the finding through related work.
 """
@@ -5258,6 +5334,9 @@ Rules:
 - Thesis entries marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY are not allowed citations.
 - Use thesis RoL notes only to understand which original primary studies should be searched/selected; cite only
   original primary papers or review papers that are present as directly citable selected references.
+- When objective_matched_rol_extracts are available, use them to understand which RoL citations match our objective
+  and result direction. Cite only the selected original papers recovered from those citations, not the thesis itself.
+- Do not copy the thesis author's RoL sentences into the Discussion; paraphrase the evidence logic in the selected style.
 - Use review-paper synthesis insights to frame the discussion, but do not use a review as the only support for a
   specific experimental result or method comparison when the original primary paper lead has not been selected/read.
 - If review bibliography leads are present but the original papers are not selected, mention the need cautiously
