@@ -1792,6 +1792,10 @@ with tabs[3]:
                 with st.expander("Research-paper Discussion citation map", expanded=True):
                     for mapped_reference in research_discussion_map[:30]:
                         st.write(mapped_reference)
+            research_extraction_leads = recommendations.get("research_discussion_evidence_extraction_leads") or []
+            if research_extraction_leads:
+                with st.expander("Whole-block research Discussion extraction sheet", expanded=True):
+                    st.dataframe(pd.DataFrame(research_extraction_leads[:50]), width="stretch", hide_index=True)
             if research_discussion_leads:
                 with st.expander("Original references cited inside research-paper Discussions", expanded=True):
                     for lead in research_discussion_leads[:30]:
@@ -1853,6 +1857,10 @@ with tabs[3]:
                         st.write(insight)
 
             review_section_coverage = recommendations.get("review_related_section_coverage") or []
+            review_extraction_leads = recommendations.get("review_section_evidence_extraction_leads") or []
+            if review_extraction_leads:
+                with st.expander("Whole-section review extraction sheet", expanded=True):
+                    st.dataframe(pd.DataFrame(review_extraction_leads[:50]), width="stretch", hide_index=True)
             if review_section_coverage:
                 with st.expander("Most related review-paper section coverage", expanded=True):
                     for coverage in review_section_coverage[:20]:
@@ -1938,6 +1946,10 @@ with tabs[3]:
                         st.write(lead)
 
             objective_rol_leads = recommendations.get("objective_matched_rol_leads") or []
+            objective_rol_extraction_leads = recommendations.get("objective_matched_rol_evidence_leads") or []
+            if objective_rol_extraction_leads:
+                with st.expander("Whole-block thesis RoL extraction sheet", expanded=True):
+                    st.dataframe(pd.DataFrame(objective_rol_extraction_leads[:50]), width="stretch", hide_index=True)
             if objective_rol_leads:
                 with st.expander("Objective-matched thesis RoL leads", expanded=True):
                     for lead in objective_rol_leads[:30]:
@@ -2118,6 +2130,9 @@ with tabs[3]:
                     st.markdown(f"**{citation_key(paper)} {paper.get('title', '')}**")
                     if note.get("research_discussion_notes"):
                         st.write(note["research_discussion_notes"])
+                    if note.get("research_discussion_evidence_extraction_sheet"):
+                        st.markdown("**Whole-block Discussion extraction sheet**")
+                        st.dataframe(pd.DataFrame(note.get("research_discussion_evidence_extraction_sheet", [])[:30]), width="stretch", hide_index=True)
                     if note.get("research_discussion_full_coverage"):
                         st.markdown("**Full Discussion / Results and Discussion coverage**")
                         for coverage in note.get("research_discussion_full_coverage", [])[:8]:
@@ -2146,6 +2161,9 @@ with tabs[3]:
                     st.markdown(f"**{citation_key(paper)} {paper.get('title', '')}**")
                     if note.get("review_related_section_notes"):
                         st.write(note["review_related_section_notes"])
+                    if note.get("review_section_evidence_extraction_sheet"):
+                        st.markdown("**Whole-section review extraction sheet**")
+                        st.dataframe(pd.DataFrame(note.get("review_section_evidence_extraction_sheet", [])[:30]), width="stretch", hide_index=True)
                     if note.get("review_related_section_full_coverage"):
                         st.markdown("**Most related review section coverage**")
                         for coverage in note.get("review_related_section_full_coverage", [])[:8]:
@@ -2176,6 +2194,9 @@ with tabs[3]:
                         st.write(note["thesis_introduction_notes"])
                     if note.get("review_of_literature_notes"):
                         st.write(note["review_of_literature_notes"])
+                    if note.get("objective_matched_rol_evidence_extraction_sheet"):
+                        st.markdown("**Whole-block thesis RoL extraction sheet**")
+                        st.dataframe(pd.DataFrame(note.get("objective_matched_rol_evidence_extraction_sheet", [])[:30]), width="stretch", hide_index=True)
                     if note.get("objective_matched_rol_extracts"):
                         st.markdown("**Objective-matched RoL extracts**")
                         for extract in note.get("objective_matched_rol_extracts", [])[:8]:

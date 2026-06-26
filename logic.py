@@ -3812,6 +3812,8 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
                 or lead.get("discussion_topic_or_finding")
                 or lead.get("review_section_heading_or_topic")
                 or lead.get("rol_heading_or_topic")
+                or lead.get("claim_or_point")
+                or lead.get("evidence_point")
                 or lead.get("topic")
                 or lead.get("why_it_matches")
             )
@@ -3825,6 +3827,8 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
                 or lead.get("full_section_paraphrase")
                 or lead.get("evidence_context_in_discussion")
                 or lead.get("evidence_context_in_review_section")
+                or lead.get("context_or_condition")
+                or lead.get("citation_role")
                 or lead.get("why_useful_for_discussion")
             )
             bibliography_entry = lead.get("bibliography_entry_if_found") or lead.get("bibliography_entry")
@@ -3832,6 +3836,10 @@ def source_mined_primary_study_search_queries(leads: list[Any], context_text: st
                 add_query(bibliography_entry)
             for bibliography_entry in values_as_list(lead.get("bibliography_entries")):
                 add_query(bibliography_entry)
+            for bibliography_entry in values_as_list(lead.get("bibliography_entries_if_found")):
+                add_query(bibliography_entry)
+            for search_query in values_as_list(lead.get("original_paper_search_queries")):
+                add_query(search_query)
             for cited_author_year in values_as_list(lead.get("cited_author_years")):
                 add_query(f"{cited_author_year} {context_terms} research paper")
             if author_year and title:
@@ -3980,9 +3988,11 @@ def gemini_mine_pdf_images_for_source_text(
 - Extract those objective-matched RoL blocks with page numbers, headings if visible, author-year citations, crop/pest/context,
   methods/treatments, key findings, and why the block matches our Discussion need.
 - Include every visible author-year citation in each matched RoL block and paraphrase the full evidence logic of that block.
-- Read the whole matched RoL block before summarizing it. Do not stop at only the most similar sentence.
+- Read the whole matched RoL block before extracting it. Do not stop at only the most similar sentence.
 - Capture a full-block coverage record: start/end cues, estimated block length, all visible citations, the complete
   argument/evidence flow in paraphrase, and any unreadable or uncertain lines.
+- Extract the whole matched RoL block as ordered evidence rows. Every meaningful claim, contrast, mechanism,
+  method/context statement, implication, and cited-study comparison in the block should be represented.
 - Add a short exact same-word excerpt from the matched RoL block for verification. If the whole matched block is 120 words
   or fewer, the exact excerpt may contain the whole block; if it is longer, quote only the most diagnostic sentences and
   mark that the full block was longer.
@@ -3992,8 +4002,10 @@ def gemini_mine_pdf_images_for_source_text(
     elif "research" in category_lower or "article" in category_lower:
         mining_task = """
 - For research articles, focus on visible Discussion, Results and Discussion, Conclusion/Implications, and references pages.
-- Read the whole visible Discussion or Results and Discussion block before summarizing it. Do not stop at only the
+- Read the whole visible Discussion or Results and Discussion block before extracting it. Do not stop at only the
   most similar sentence.
+- Extract the whole Discussion or Results and Discussion block as ordered evidence rows. Every meaningful claim,
+  contrast, mechanism, implication, and cited-study comparison in the block should be represented.
 - Extract the complete discussion evidence flow in paraphrase: finding/topic -> explanation/mechanism -> agreement or
   contrast with cited studies -> implication or limitation.
 - Capture every visible in-text citation used in the Discussion block and match it to bibliography/reference entries
@@ -4004,7 +4016,9 @@ def gemini_mine_pdf_images_for_source_text(
         mining_task = """
 - For review papers, find the visible review section/subsection most related to the current crop/host, pest/problem,
   objective, treatment/factor, mechanism, or result direction.
-- Read the whole related section before summarizing it. Do not stop at only one matching sentence.
+- Read the whole related section before extracting it. Do not stop at only one matching sentence.
+- Extract the whole related review section as ordered evidence rows. Every meaningful claim, contrast, mechanism,
+  pattern, implication, gap statement, and cited-study comparison in the section should be represented.
 - Extract the complete section evidence flow in paraphrase: section topic -> cited studies -> mechanisms/patterns ->
   agreements/contrasts -> implications or knowledge gaps.
 - Capture every visible in-text citation used in that related review section and match it to bibliography/reference
@@ -4140,6 +4154,7 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "result_links": [],
         "discussion_points": [],
         "research_discussion_notes": "",
+        "research_discussion_evidence_extraction_sheet": [],
         "research_discussion_full_coverage": [],
         "research_discussion_citation_map": [],
         "research_discussion_reference_leads": [],
@@ -4150,6 +4165,7 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "reference_list_notes": "",
         "most_useful_references": [],
         "introduction_reference_leads": [],
+        "objective_matched_rol_evidence_extraction_sheet": [],
         "objective_matched_rol_extracts": [],
         "objective_matched_rol_full_block_coverage": [],
         "objective_matched_rol_verbatim_excerpts": [],
@@ -4162,6 +4178,7 @@ def fallback_gemini_note(paper: dict[str, Any], evidence_source: str, status: st
         "cite_thesis_directly": False,
         "review_synthesis_insights": [],
         "review_related_section_notes": "",
+        "review_section_evidence_extraction_sheet": [],
         "review_related_section_full_coverage": [],
         "review_section_citation_map": [],
         "review_related_reference_leads": [],
@@ -4245,7 +4262,7 @@ For theses selected for the Introduction:
 - Focus on the thesis Introduction, background, problem statement, objective/rationale, crop importance,
   pest/problem status, damage/yield-loss statements, distribution/occurrence, regional context, and knowledge gap.
 - Use the thesis bibliography/references to identify the original studies cited for those Introduction/background claims.
-- thesis_introduction_notes must summarize only introduction/background evidence useful for our Introduction.
+- thesis_introduction_notes must extract only introduction/background evidence useful for our Introduction.
 - introduction_reference_leads must list original author-year/title/search leads from the thesis Introduction and bibliography.
 - primary_study_leads and most_useful_references should prioritize original studies behind Introduction claims, not the thesis itself.
 - thesis_citation_policy must be "do_not_cite_thesis_directly" unless the thesis contains unique primary data that must be cited.
@@ -4263,6 +4280,14 @@ For theses:
   is_exact_excerpt_complete_block, full_block_read_status, estimated_full_block_word_count, block_start_cue,
   block_end_cue, concise_rol_content, full_block_paraphrase, all_citations_in_block, unreadable_or_uncertain_parts,
   why_it_matches_our_discussion, and how_to_use_without_copying.
+- objective_matched_rol_evidence_extraction_sheet is the primary whole-block extraction output for thesis RoL mining.
+  It must represent the whole matched RoL block, not just highlights. It must be an ordered
+  array of claim-by-claim objects from the matched RoL block with evidence_order, claim_or_point, cited_author_years,
+  citation_role (support, contrast, mechanism, context, method, or implication), crop_pest_context,
+  treatment_or_factor_if_any, result_or_direction_reported, context_or_condition, bibliography_entries_if_found,
+  original_paper_search_queries, and why_this_claim_matters_for_our_discussion.
+- Every meaningful claim, mechanism, contrast, implication, method/context statement, and cited-study comparison in the
+  matched block should appear as a separate row. Do extraction first. Do not replace the evidence sheet with a short summary.
 - For each matched RoL block, include all visible author-year citations that belong to that objective/topic, not only
   the most recent or most favorable citation.
 - Before producing concise_rol_content, read the whole matched RoL block. Do not judge the block only from one keyword,
@@ -4298,7 +4323,15 @@ For research articles:
 - If a Discussion or Results and Discussion section is supplied, read the whole supplied section before judging relevance.
 - Do not copy the article's Discussion wording into the manuscript. Use it for evidence logic, comparison structure,
   mechanisms, and source-mining.
-- research_discussion_notes must summarize the complete Discussion logic relevant to our study.
+- research_discussion_notes is secondary; it may give a brief use-note after the extraction sheet.
+- research_discussion_evidence_extraction_sheet is the primary whole-block extraction output for research-article
+  Discussion mining. It must represent the whole supplied Discussion or Results and Discussion block, not just highlights. It must
+  be an ordered array of claim-by-claim objects from the Discussion/Results and Discussion with evidence_order,
+  claim_or_point, in_text_citations, citation_role (support, contrast, mechanism, context, method, implication),
+  finding_or_result_being_explained, mechanism_or_explanation, context_or_condition, bibliography_entries_if_found,
+  original_paper_search_queries, and how_this_claim_can_support_our_discussion.
+- Every meaningful claim, mechanism, contrast, implication, limitation, and cited-study comparison in the block should
+  appear as a separate row. Do extraction first. Do not replace the evidence sheet with a normal summary.
 - research_discussion_full_coverage must be an array of objects with discussion_topic_or_finding,
   matched_user_result_or_discussion_need, section_location_if_available, full_discussion_block_read_status,
   estimated_discussion_block_word_count, full_discussion_paraphrase, mechanisms_or_explanations,
@@ -4318,7 +4351,15 @@ For review papers:
 - First identify the section/subsection most related to our crop/host, pest/problem, objective, treatment/factor,
   mechanism, result direction, or discussion need.
 - Read the whole matched review section/subsection before judging relevance. Do not use only one matching sentence.
-- review_related_section_notes must summarize why the matched section matters for our paper.
+- review_related_section_notes is secondary; it may give a brief use-note after the extraction sheet.
+- review_section_evidence_extraction_sheet is the primary whole-section extraction output for review-paper section
+  mining. It must represent the whole matched review section/subsection, not just highlights. It must be an ordered
+  array of claim-by-claim objects from the matched review section with evidence_order, claim_or_point,
+  in_text_citations, citation_role (support, contrast, mechanism, context, method, implication), crop_pest_context,
+  treatment_or_factor_if_any, mechanism_or_pattern, context_or_condition, bibliography_entries_if_found,
+  original_paper_search_queries, and why_this_claim_matters_for_our_discussion.
+- Every meaningful synthesis claim, mechanism, contrast, implication, gap statement, and cited-study comparison in the
+  matched section should appear as a separate row. Do extraction first. Do not replace the evidence sheet with a broad review summary.
 - review_related_section_full_coverage must be an array of objects with review_section_heading_or_topic,
   matched_user_objective_or_result, section_location_if_available, full_section_read_status,
   estimated_section_word_count, full_section_paraphrase, mechanisms_or_synthesis_points,
@@ -4379,17 +4420,19 @@ Selected author writing-style contract to keep in view while reading:
 Return only a JSON object with these keys:
 citation, title, category, evidence_source, overall_relevance, why_relevant,
 methodology_links, result_links, discussion_points, research_discussion_notes,
-research_discussion_full_coverage, research_discussion_citation_map,
+research_discussion_evidence_extraction_sheet, research_discussion_full_coverage, research_discussion_citation_map,
 research_discussion_reference_leads, research_discussion_search_queries,
 research_discussion_verification_excerpts, thesis_introduction_notes,
 review_of_literature_notes, reference_list_notes, most_useful_references,
-introduction_reference_leads, objective_matched_rol_extracts,
+introduction_reference_leads, objective_matched_rol_evidence_extraction_sheet,
+objective_matched_rol_extracts,
 objective_matched_rol_full_block_coverage,
 objective_matched_rol_verbatim_excerpts,
 objective_matched_rol_bibliography, rol_citation_to_bibliography_map,
 objective_matched_rol_search_queries, rol_primary_studies, primary_study_leads,
 thesis_citation_policy, cite_thesis_directly, review_synthesis_insights,
-review_related_section_notes, review_related_section_full_coverage,
+review_related_section_notes, review_section_evidence_extraction_sheet,
+review_related_section_full_coverage,
 review_section_citation_map, review_related_reference_leads,
 review_related_search_queries, review_related_verification_excerpts,
 review_primary_studies, review_reference_leads, review_primary_study_leads,
@@ -4447,10 +4490,13 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
             }
         )
     thesis_leads = []
+    objective_rol_extraction_leads = []
     objective_rol_leads = []
+    research_discussion_extraction_leads = []
     research_discussion_leads = []
     research_discussion_maps = []
     review_leads = []
+    review_section_extraction_leads = []
     review_insights = []
     review_section_coverage = []
     review_section_maps = []
@@ -4458,6 +4504,8 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
         note = paper.get("gemini_note") or {}
         category = paper.get("category") or infer_paper_category(paper)
         if category == "Thesis":
+            objective_rol_extraction_leads.extend(note.get("objective_matched_rol_evidence_extraction_sheet") or [])
+            objective_rol_leads.extend(note.get("objective_matched_rol_evidence_extraction_sheet") or [])
             objective_rol_leads.extend(note.get("objective_matched_rol_extracts") or [])
             objective_rol_leads.extend(note.get("objective_matched_rol_full_block_coverage") or [])
             objective_rol_leads.extend(note.get("rol_citation_to_bibliography_map") or [])
@@ -4467,10 +4515,14 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
             thesis_leads.extend(note.get("objective_matched_rol_search_queries") or [])
             thesis_leads.extend(note.get("primary_study_leads") or [])
         elif category == "Research Article":
+            research_discussion_extraction_leads.extend(note.get("research_discussion_evidence_extraction_sheet") or [])
+            research_discussion_leads.extend(note.get("research_discussion_evidence_extraction_sheet") or [])
             research_discussion_leads.extend(note.get("research_discussion_reference_leads") or [])
             research_discussion_leads.extend(note.get("research_discussion_search_queries") or [])
             research_discussion_maps.extend(note.get("research_discussion_citation_map") or [])
         elif category == "Review Paper":
+            review_section_extraction_leads.extend(note.get("review_section_evidence_extraction_sheet") or [])
+            review_section_coverage.extend(note.get("review_section_evidence_extraction_sheet") or [])
             review_insights.extend(note.get("review_synthesis_insights") or [])
             review_section_coverage.extend(note.get("review_related_section_full_coverage") or [])
             review_leads.extend(note.get("review_related_reference_leads") or [])
@@ -4484,10 +4536,13 @@ def fallback_reference_recommendations(papers: list[dict[str, Any]]) -> dict[str
         "thesis_reference_leads": thesis_leads[:20],
         "thesis_primary_study_leads": thesis_leads[:20],
         "objective_matched_rol_leads": objective_rol_leads[:20],
+        "objective_matched_rol_evidence_leads": objective_rol_extraction_leads[:30],
+        "research_discussion_evidence_extraction_leads": research_discussion_extraction_leads[:30],
         "research_discussion_reference_leads": research_discussion_leads[:30],
         "research_discussion_citation_map": research_discussion_maps[:30],
         "review_discussion_insights": review_insights[:20],
         "review_related_section_coverage": review_section_coverage[:20],
+        "review_section_evidence_extraction_leads": review_section_extraction_leads[:30],
         "review_section_citation_map": review_section_maps[:30],
         "review_related_reference_leads": review_leads[:20],
         "review_reference_leads": review_leads[:20],
@@ -4534,7 +4589,8 @@ def summarize_gemini_reference_notes(
         )
     prompt = f"""
 Use these Gemini reading notes to choose the most relatable references for the user's research paper.
-Give priority to sources that directly match the methodology, result pattern, crop/host/pest/problem,
+This is a whole-block extraction-first workflow: use claim-by-claim extraction sheets before broad summaries.
+Give priority to extracted claims that directly match the methodology, result pattern, crop/host/pest/problem,
 treatments, location/weather context, or discussion interpretation.
 
 Cross-section citation rule:
@@ -4555,6 +4611,8 @@ Critical thesis rule:
   reference entries for the citations inside those blocks.
 - Use objective_matched_rol_full_block_coverage to confirm that Gemini read the complete matched RoL block, including
   all visible citations and the full evidence flow, before recommending original paper leads.
+- Use objective_matched_rol_evidence_extraction_sheet as the main thesis RoL evidence source because it represents
+  the whole matched RoL block as separate claims with citations, context, bibliography entries, and search queries.
 - Put original studies from thesis Introduction/RoL/bibliography in thesis_primary_study_leads and suggested_search_queries
   so they can be found and cited as primary sources.
 - Do not copy thesis RoL wording into the manuscript. The thesis author's RoL is a map for locating and interpreting
@@ -4565,6 +4623,9 @@ Critical thesis rule:
 Critical research-article Discussion rule:
 - For research articles with downloaded PDFs, use research_discussion_full_coverage to understand the paper's complete
   Discussion or Results and Discussion logic.
+- Use research_discussion_evidence_extraction_sheet as the main evidence source because it represents the whole
+  Discussion/Results and Discussion block as separate claims with citations, citation roles, bibliography entries,
+  and search queries.
 - Use research_discussion_citation_map and research_discussion_reference_leads to identify the original references cited
   inside that paper's Discussion.
 - Recommend those cited references as source-mining leads when they are relevant to our Discussion. They should be
@@ -4575,6 +4636,8 @@ Critical research-article Discussion rule:
 Critical review-paper rule:
 - Use review papers to mine the most related section/subsection first, not only the whole-paper summary.
 - Use review_related_section_full_coverage to understand the complete related-section logic.
+- Use review_section_evidence_extraction_sheet as the main review-paper evidence source because it represents the
+  whole matched review section as separate claims with citation roles, bibliography entries, and original-paper queries.
 - Use review_section_citation_map and review_related_reference_leads to identify the original references cited inside
   that matched review section.
 - Put broad synthesis points in review_discussion_insights so they can guide the Discussion.
@@ -4598,10 +4661,13 @@ Return only a JSON object with keys:
 best_references: array of objects with citation, title, category, why_to_use, where_to_use;
 research_discussion_reference_leads: array of bibliography entries or source leads cited inside research-article Discussion sections;
 research_discussion_citation_map: array of objects mapping in-text Discussion citations to bibliography entries and search queries;
+research_discussion_evidence_extraction_leads: array of claim-by-claim extraction objects from research-paper Discussion sections that are useful for our paper;
 thesis_reference_leads: array of bibliography entries or source leads found inside thesis references;
 thesis_primary_study_leads: array of primary author-year study leads extracted from thesis Introduction/RoL/bibliography;
+objective_matched_rol_evidence_leads: array of claim-by-claim extraction objects from thesis RoL blocks that are useful for our Discussion;
 objective_matched_rol_leads: array of objects with matched_objective_or_result, cited_author_years, bibliography_entries, search_queries, full_block_paraphrase, why_useful_for_discussion;
 review_discussion_insights: array of review-derived synthesis insights useful for the Discussion;
+review_section_evidence_extraction_leads: array of claim-by-claim extraction objects from matched review sections that are useful for our Discussion;
 review_related_section_coverage: array of objects with review_section_heading_or_topic, matched_user_objective_or_result, full_section_paraphrase, all_in_text_citations_in_section, how_to_use_in_our_discussion;
 review_section_citation_map: array of objects mapping in-text citations from the related review section to bibliography entries and search queries;
 review_related_reference_leads: array of bibliography entries or source leads cited inside the matched review section;
@@ -5004,6 +5070,9 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
                     "result_links": gemini_note.get("result_links", [])[:5],
                     "discussion_points": gemini_note.get("discussion_points", [])[:6],
                     "research_discussion_notes": truncate_text(gemini_note.get("research_discussion_notes", ""), 900),
+                    "research_discussion_evidence_extraction_sheet": gemini_note.get(
+                        "research_discussion_evidence_extraction_sheet", []
+                    )[:12],
                     "research_discussion_full_coverage": gemini_note.get("research_discussion_full_coverage", [])[:8],
                     "research_discussion_citation_map": gemini_note.get("research_discussion_citation_map", [])[:10],
                     "research_discussion_reference_leads": gemini_note.get("research_discussion_reference_leads", [])[:10],
@@ -5014,6 +5083,9 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
                     "thesis_introduction_notes": truncate_text(gemini_note.get("thesis_introduction_notes", ""), 900),
                     "review_of_literature_notes": truncate_text(gemini_note.get("review_of_literature_notes", ""), 900),
                     "introduction_reference_leads": gemini_note.get("introduction_reference_leads", [])[:10],
+                    "objective_matched_rol_evidence_extraction_sheet": gemini_note.get(
+                        "objective_matched_rol_evidence_extraction_sheet", []
+                    )[:12],
                     "objective_matched_rol_extracts": rol_extracts_for_writing_context(
                         gemini_note.get("objective_matched_rol_extracts", []), 8
                     ),
@@ -5031,6 +5103,9 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
                     "primary_study_leads": gemini_note.get("primary_study_leads", [])[:10],
                     "review_synthesis_insights": gemini_note.get("review_synthesis_insights", [])[:8],
                     "review_related_section_notes": truncate_text(gemini_note.get("review_related_section_notes", ""), 900),
+                    "review_section_evidence_extraction_sheet": gemini_note.get(
+                        "review_section_evidence_extraction_sheet", []
+                    )[:12],
                     "review_related_section_full_coverage": gemini_note.get("review_related_section_full_coverage", [])[:8],
                     "review_section_citation_map": gemini_note.get("review_section_citation_map", [])[:10],
                     "review_related_reference_leads": gemini_note.get("review_related_reference_leads", [])[:10],
@@ -5574,6 +5649,9 @@ Rules:
   and result direction. Cite only the selected original papers recovered from those citations, not the thesis itself.
 - Prefer objective_matched_rol_full_block_coverage over isolated exact excerpts because it represents the whole matched
   RoL block's evidence flow.
+- Prefer claim-by-claim extraction sheets over broad summaries:
+  objective_matched_rol_evidence_extraction_sheet, research_discussion_evidence_extraction_sheet,
+  and review_section_evidence_extraction_sheet show the citation role and evidence context more reliably.
 - Do not copy the thesis author's RoL sentences or short_exact_rol_excerpt text into the Discussion; paraphrase the
   evidence logic in the selected style.
 - Use review-paper synthesis insights to frame the discussion, but do not use a review as the only support for a
