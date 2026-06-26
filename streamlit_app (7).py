@@ -845,6 +845,46 @@ def pdf_availability_status(paper: dict) -> str:
     return "No PDF clue"
 
 
+def download_outcome_label(item: dict) -> str:
+    if item.get("download_success") and item.get("text_status") == "readable_text":
+        return "Downloaded and readable"
+    if item.get("download_success"):
+        return "Downloaded, low text"
+    return "Missing PDF"
+
+
+def download_reason(item: dict) -> str:
+    if item.get("download_success") and item.get("text_status") == "readable_text":
+        return "PDF downloaded and enough text was extracted for Gemini reading."
+    if item.get("download_success"):
+        return "PDF downloaded, but extracted text is short or scan-like; Gemini image/PDF reading may still help."
+    if pdf_availability_status(item) == "No PDF clue":
+        return "No direct PDF/open-access clue was found in the search result."
+    return "A PDF/open-access clue existed, but the app could not fetch an open PDF from direct link, ResearchGate, thesis repository, Scholar cluster, CORE, or Unpaywall."
+
+
+def download_status_rows(items: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "outcome": download_outcome_label(item),
+                "why": download_reason(item),
+                "pdf_available": pdf_availability_status(item),
+                "method": item.get("download_method", ""),
+                "text_status": item.get("text_status", ""),
+                "text_engine": item.get("text_extraction_method", ""),
+                "chars": item.get("full_text_chars", 0),
+                "size_mb": round((item.get("pdf_size_bytes", 0) or 0) / 1024 / 1024, 2),
+                "section": item.get("evidence_section", ""),
+                "category": item.get("category", ""),
+                "title": item.get("title", ""),
+                "pdf_path": item.get("pdf_path", ""),
+            }
+            for item in items
+        ]
+    )
+
+
 def paper_rows(papers: list[dict]) -> pd.DataFrame:
     rows = []
     for index, paper in enumerate(papers):
@@ -1549,225 +1589,252 @@ with tabs[2]:
                 with st.expander("Full evidence-selection plan", expanded=False):
                     st.dataframe(evidence_plan_rows(plan_items), width="stretch", hide_index=True)
 
-            known_categories = {category for _label, category, _key in SOURCE_TYPE_SECTIONS}
-            other_papers = [paper for paper in papers if paper.get("category", "Research Article") not in known_categories]
-            source_sections = list(SOURCE_TYPE_SECTIONS)
-            if other_papers:
-                source_sections.append(("Other sources", "__OTHER__", "other_sources"))
+            select_sources_tab, download_status_tab = st.tabs(["Select Sources", "Download / Extraction Status"])
 
-            edited_frames = []
-            sections_present = sorted(
-                {paper.get("evidence_section") or "Discussion" for paper in papers} | {item.get("section", "Discussion") for item in plan_items},
-                key=section_sort_key,
-            )
-            if "Other" in sections_present and not other_papers:
-                sections_present = [section for section in sections_present if section != "Other"]
-            section_tabs = st.tabs(sections_present)
-            for section_tab, section in zip(section_tabs, sections_present):
-                with section_tab:
-                    section_plan = evidence_plan_rows(plan_items, section=section)
-                    if not section_plan.empty:
-                        with st.expander(f"{section} reference plan", expanded=True):
-                            st.dataframe(section_plan, width="stretch", hide_index=True)
-                    else:
-                        st.info(f"No explicit {section.lower()} plan was returned; papers are grouped here by query keywords.")
+            with select_sources_tab:
+                known_categories = {category for _label, category, _key in SOURCE_TYPE_SECTIONS}
+                other_papers = [paper for paper in papers if paper.get("category", "Research Article") not in known_categories]
+                source_sections = list(SOURCE_TYPE_SECTIONS)
+                if other_papers:
+                    source_sections.append(("Other sources", "__OTHER__", "other_sources"))
 
-                    section_papers = [
-                        paper
-                        for paper in papers
-                        if (paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", ""))) == section
-                    ]
-                    active_source_sections = METHODOLOGY_SOURCE_TYPE_SECTIONS if section == "Methodology" else source_sections
-                    if section == "Methodology":
-                        st.caption("Methodology evidence is limited to original/foundational method citations. Review-paper and thesis mining are not used here.")
-                    source_tabs = st.tabs([label for label, _category, _key in active_source_sections])
-                    for source_tab, (label, category, key_suffix) in zip(source_tabs, active_source_sections):
-                        with source_tab:
-                            if category == "__OTHER__":
-                                category_papers = [
-                                    paper
-                                    for paper in section_papers
-                                    if paper.get("category", "Research Article") not in known_categories
-                                ]
-                            else:
-                                category_papers = [
-                                    paper
-                                    for paper in section_papers
-                                    if paper.get("category", "Research Article") == category
-                                ]
-                            selected_in_category = len([paper for paper in category_papers if paper.get("selected")])
-                            pdf_clue_count = len(
-                                [
-                                    paper
-                                    for paper in category_papers
-                                    if pdf_availability_status(paper) in {"Downloaded", "PDF link", "Open-access clue"}
-                                ]
-                            )
-                            st.caption(
-                                f"{len(category_papers)} found; {selected_in_category} currently selected; "
-                                f"{pdf_clue_count} with PDF/full-text clue."
-                            )
-                            if category_papers:
-                                section_key = normalize_match_text(section).replace(" ", "_") or "section"
-                                st.write(f"Selection purpose: {fallback_evidence_need(section, category)}")
-                                st.write(f"Citation policy: {citation_policy_for_category(category)}")
-                                edited_frames.append(
-                                    paper_selection_editor(
-                                        category_papers,
-                                        f"evidence_select_{section_key}_{key_suffix}",
-                                    )
+                edited_frames = []
+                sections_present = sorted(
+                    {paper.get("evidence_section") or "Discussion" for paper in papers} | {item.get("section", "Discussion") for item in plan_items},
+                    key=section_sort_key,
+                )
+                if "Other" in sections_present and not other_papers:
+                    sections_present = [section for section in sections_present if section != "Other"]
+                section_tabs = st.tabs(sections_present)
+                for section_tab, section in zip(section_tabs, sections_present):
+                    with section_tab:
+                        section_plan = evidence_plan_rows(plan_items, section=section)
+                        if not section_plan.empty:
+                            with st.expander(f"{section} reference plan", expanded=True):
+                                st.dataframe(section_plan, width="stretch", hide_index=True)
+                        else:
+                            st.info(f"No explicit {section.lower()} plan was returned; papers are grouped here by query keywords.")
+
+                        section_papers = [
+                            paper
+                            for paper in papers
+                            if (paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", ""))) == section
+                        ]
+                        active_source_sections = METHODOLOGY_SOURCE_TYPE_SECTIONS if section == "Methodology" else source_sections
+                        if section == "Methodology":
+                            st.caption("Methodology evidence is limited to original/foundational method citations. Review-paper and thesis mining are not used here.")
+                        source_tabs = st.tabs([label for label, _category, _key in active_source_sections])
+                        for source_tab, (label, category, key_suffix) in zip(source_tabs, active_source_sections):
+                            with source_tab:
+                                if category == "__OTHER__":
+                                    category_papers = [
+                                        paper
+                                        for paper in section_papers
+                                        if paper.get("category", "Research Article") not in known_categories
+                                    ]
+                                else:
+                                    category_papers = [
+                                        paper
+                                        for paper in section_papers
+                                        if paper.get("category", "Research Article") == category
+                                    ]
+                                selected_in_category = len([paper for paper in category_papers if paper.get("selected")])
+                                pdf_clue_count = len(
+                                    [
+                                        paper
+                                        for paper in category_papers
+                                        if pdf_availability_status(paper) in {"Downloaded", "PDF link", "Open-access clue"}
+                                    ]
                                 )
-                            else:
-                                st.info(f"No {label.lower()} found for {section.lower()} yet.")
+                                st.caption(
+                                    f"{len(category_papers)} found; {selected_in_category} currently selected; "
+                                    f"{pdf_clue_count} with PDF/full-text clue."
+                                )
+                                if category_papers:
+                                    section_key = normalize_match_text(section).replace(" ", "_") or "section"
+                                    st.write(f"Selection purpose: {fallback_evidence_need(section, category)}")
+                                    st.write(f"Citation policy: {citation_policy_for_category(category)}")
+                                    edited_frames.append(
+                                        paper_selection_editor(
+                                            category_papers,
+                                            f"evidence_select_{section_key}_{key_suffix}",
+                                        )
+                                    )
+                                else:
+                                    st.info(f"No {label.lower()} found for {section.lower()} yet.")
 
-            if st.button("Save selected sources from all sections", width="stretch"):
-                selected_ids = set()
-                for edited in edited_frames:
-                    selected_ids.update(edited.loc[edited["selected"] == True, "paper_id"].astype(str).tolist())
-                selected = []
-                for paper in papers:
-                    paper["selected"] = str(paper.get("paper_id")) in selected_ids
-                    if paper["selected"]:
-                        selected.append(paper)
-                st.session_state.paper_search["papers"] = papers
-                st.session_state.selected_papers = selected
-                st.session_state.downloaded_references = [
-                    item for item in st.session_state.get("downloaded_references", []) if str(item.get("paper_id")) in selected_ids
-                ]
-                selected_summary = pd.DataFrame(
-                    [
-                        {
-                            "section": section,
-                            "research_papers": len(
-                                [
-                                    p
-                                    for p in selected
-                                    if p.get("evidence_section") == section and p.get("category") == "Research Article"
-                                ]
-                            ),
-                            "review_papers": len(
-                                [
-                                    p
-                                    for p in selected
-                                    if p.get("evidence_section") == section and p.get("category") == "Review Paper"
-                                ]
-                            ),
-                            "theses": len(
-                                [
-                                    p
-                                    for p in selected
-                                    if p.get("evidence_section") == section and p.get("category") == "Thesis"
-                                ]
-                            ),
-                        }
-                        for section in EVIDENCE_SECTION_ORDER
+                if st.button("Save selected sources from all sections", width="stretch"):
+                    selected_ids = set()
+                    for edited in edited_frames:
+                        selected_ids.update(edited.loc[edited["selected"] == True, "paper_id"].astype(str).tolist())
+                    selected = []
+                    for paper in papers:
+                        paper["selected"] = str(paper.get("paper_id")) in selected_ids
+                        if paper["selected"]:
+                            selected.append(paper)
+                    st.session_state.paper_search["papers"] = papers
+                    st.session_state.selected_papers = selected
+                    st.session_state.downloaded_references = [
+                        item for item in st.session_state.get("downloaded_references", []) if str(item.get("paper_id")) in selected_ids
                     ]
-                )
-                st.success(f"Saved {len(selected)} selected source(s) from section-wise evidence baskets.")
-                st.dataframe(selected_summary, width="stretch", hide_index=True)
-
-            selected_papers = st.session_state.get("selected_papers", [])
-            if selected_papers:
-                st.divider()
-                st.subheader("Download and Extract Selected PDFs")
-                st.caption(
-                    "Use this before Gemini reading so the app can extract full-paper text first."
-                )
-                dl_cols = st.columns(4)
-                dl_cols[0].metric("Selected", len(selected_papers))
-                dl_cols[1].metric("With PDF clue", len([p for p in selected_papers if p.get("pdf_url") or p.get("pdf_urls")]))
-                downloaded_refs = st.session_state.get("downloaded_references", [])
-                dl_cols[2].metric("Downloaded", len([p for p in downloaded_refs if p.get("download_success")]))
-                dl_cols[3].metric("Readable chars", sum(int(p.get("full_text_chars") or 0) for p in downloaded_refs))
-
-                if st.button("Download and extract selected PDFs", type="primary", width="stretch"):
-                    with st.spinner("Finding open PDFs, downloading selected papers, and extracting full text..."):
-                        downloaded = download_and_read_selected_papers(
-                            selected_papers,
-                            serpapi_key=st.session_state.serpapi_key,
-                            core_key=st.session_state.core_key,
-                            semantic_key=st.session_state.semantic_key,
-                        )
-                    existing_notes = {
-                        str(item.get("paper_id")): item
-                        for item in [*selected_papers, *st.session_state.get("downloaded_references", [])]
-                        if item.get("gemini_note")
-                    }
-                    for item in downloaded:
-                        existing = existing_notes.get(str(item.get("paper_id")))
-                        if existing and not item.get("gemini_note"):
-                            for key, value in existing.items():
-                                if key.startswith("gemini") or key in {"gemini_note"}:
-                                    item[key] = value
-                    by_id = {str(item.get("paper_id")): item for item in downloaded}
-                    st.session_state.selected_papers = [by_id.get(str(p.get("paper_id")), p) for p in selected_papers]
-                    st.session_state.downloaded_references = downloaded
-                    if st.session_state.paper_search.get("papers"):
-                        updated_papers = []
-                        for paper in st.session_state.paper_search["papers"]:
-                            updated_papers.append(by_id.get(str(paper.get("paper_id")), paper))
-                        st.session_state.paper_search["papers"] = updated_papers
-                    success_count = len([p for p in downloaded if p.get("download_success")])
-                    st.success(
-                        f"Downloaded/extracted {success_count}/{len(downloaded)} selected source(s). "
-                        "Use the Gemini Reading tab once to analyze them."
+                    selected_summary = pd.DataFrame(
+                        [
+                            {
+                                "section": section,
+                                "research_papers": len(
+                                    [
+                                        p
+                                        for p in selected
+                                        if p.get("evidence_section") == section and p.get("category") == "Research Article"
+                                    ]
+                                ),
+                                "review_papers": len(
+                                    [
+                                        p
+                                        for p in selected
+                                        if p.get("evidence_section") == section and p.get("category") == "Review Paper"
+                                    ]
+                                ),
+                                "theses": len(
+                                    [
+                                        p
+                                        for p in selected
+                                        if p.get("evidence_section") == section and p.get("category") == "Thesis"
+                                    ]
+                                ),
+                            }
+                            for section in EVIDENCE_SECTION_ORDER
+                        ]
                     )
+                    st.success(f"Saved {len(selected)} selected source(s) from section-wise evidence baskets.")
+                    st.dataframe(selected_summary, width="stretch", hide_index=True)
 
+            with download_status_tab:
+                selected_papers = st.session_state.get("selected_papers", [])
                 downloaded_refs = st.session_state.get("downloaded_references", [])
-                if downloaded_refs:
-                    download_rows = [
-                        {
-                            "status": "downloaded" if item.get("download_success") else "not found",
-                            "method": item.get("download_method", ""),
-                            "text_status": item.get("text_status", ""),
-                            "text_engine": item.get("text_extraction_method", ""),
-                            "chars": item.get("full_text_chars", 0),
-                            "size_mb": round((item.get("pdf_size_bytes", 0) or 0) / 1024 / 1024, 2),
-                            "category": item.get("category", ""),
-                            "gemini": item.get("gemini_read_status", ""),
-                            "title": item.get("title", ""),
-                            "pdf_path": item.get("pdf_path", ""),
-                        }
-                        for item in downloaded_refs
-                    ]
-                    st.dataframe(pd.DataFrame(download_rows), width="stretch", hide_index=True)
+                st.subheader("Download and Extraction Status")
+                st.caption("After saving selected sources, download PDFs here and check exactly which sources were readable, low-text, or missing.")
+                if not selected_papers:
+                    st.info("Save selected sources first. Then this tab will show the download button and status table.")
+                else:
+                    dl_cols = st.columns(5)
+                    dl_cols[0].metric("Selected", len(selected_papers))
+                    dl_cols[1].metric(
+                        "With PDF clue",
+                        len([p for p in selected_papers if pdf_availability_status(p) in {"Downloaded", "PDF link", "Open-access clue"}]),
+                    )
+                    dl_cols[2].metric("Downloaded", len([p for p in downloaded_refs if p.get("download_success")]))
+                    dl_cols[3].metric("Missing", len([p for p in downloaded_refs if not p.get("download_success")]) if downloaded_refs else 0)
+                    dl_cols[4].metric("Readable chars", sum(int(p.get("full_text_chars") or 0) for p in downloaded_refs))
 
-                with st.expander("APA 7 reference preview", expanded=False):
-                    preview_papers = st.session_state.get("selected_papers", [])
-                    for paper in preview_papers:
-                        if include_in_final_references(paper):
-                            st.write(format_apa_reference(paper))
-                            missing_parts = reference_metadata_missing(paper)
-                            if missing_parts and paper.get("category") != "Thesis":
-                                st.caption("Missing metadata not invented: " + ", ".join(missing_parts))
-                    skipped_theses = [
-                        paper for paper in preview_papers
-                        if (paper.get("category") == "Thesis" and not include_in_final_references(paper))
-                    ]
-                    if skipped_theses:
-                        st.caption(
-                            f"{len(skipped_theses)} thesis document(s) are used for source mining only; "
-                            "their extracted original bibliography entries are included below when available."
-                        )
-                    mined_rows = source_mined_reference_leads(preview_papers)
-                    if mined_rows:
-                        st.markdown("**Source-mined references included from selected bibliographies/citation maps**")
-                        st.caption("These entries do not require DOI or link. Missing components are kept as extracted rather than invented.")
+                    with st.expander("Selected sources before download", expanded=not bool(downloaded_refs)):
                         st.dataframe(
                             pd.DataFrame(
                                 [
                                     {
-                                        "citation": row.get("citation", ""),
-                                        "source": row.get("source_citation", ""),
-                                        "mined_from": row.get("source_category", ""),
-                                        "reference_entry": row.get("reference_lead", ""),
+                                        "pdf_available": pdf_availability_status(item),
+                                        "section": item.get("evidence_section", ""),
+                                        "category": item.get("category", ""),
+                                        "title": item.get("title", ""),
+                                        "source": item.get("source", ""),
                                     }
-                                    for row in mined_rows
+                                    for item in selected_papers
                                 ]
                             ),
                             width="stretch",
                             hide_index=True,
                         )
+
+                    if st.button("Download and extract selected PDFs", type="primary", width="stretch", key="download_extract_selected_sources"):
+                        with st.spinner("Finding open PDFs, downloading selected papers, and extracting full text..."):
+                            downloaded = download_and_read_selected_papers(
+                                selected_papers,
+                                serpapi_key=st.session_state.serpapi_key,
+                                core_key=st.session_state.core_key,
+                                semantic_key=st.session_state.semantic_key,
+                            )
+                        existing_notes = {
+                            str(item.get("paper_id")): item
+                            for item in [*selected_papers, *st.session_state.get("downloaded_references", [])]
+                            if item.get("gemini_note")
+                        }
+                        for item in downloaded:
+                            existing = existing_notes.get(str(item.get("paper_id")))
+                            if existing and not item.get("gemini_note"):
+                                for key, value in existing.items():
+                                    if key.startswith("gemini") or key in {"gemini_note"}:
+                                        item[key] = value
+                        by_id = {str(item.get("paper_id")): item for item in downloaded}
+                        st.session_state.selected_papers = [by_id.get(str(p.get("paper_id")), p) for p in selected_papers]
+                        st.session_state.downloaded_references = downloaded
+                        if st.session_state.paper_search.get("papers"):
+                            updated_papers = []
+                            for paper in st.session_state.paper_search["papers"]:
+                                updated_papers.append(by_id.get(str(paper.get("paper_id")), paper))
+                            st.session_state.paper_search["papers"] = updated_papers
+                        success_count = len([p for p in downloaded if p.get("download_success")])
+                        missing_count = len(downloaded) - success_count
+                        st.success(
+                            f"Downloaded/extracted {success_count}/{len(downloaded)} selected source(s); "
+                            f"{missing_count} missing. Use the status table below before Gemini Reading."
+                        )
+                        downloaded_refs = st.session_state.get("downloaded_references", [])
+
+                    if downloaded_refs:
+                        status_df = download_status_rows(downloaded_refs)
+                        st.markdown("**Download/extraction result**")
+                        st.dataframe(status_df, width="stretch", hide_index=True)
+                        missing_df = status_df[status_df["outcome"] == "Missing PDF"]
+                        low_text_df = status_df[status_df["outcome"] == "Downloaded, low text"]
+                        readable_df = status_df[status_df["outcome"] == "Downloaded and readable"]
+                        if not readable_df.empty:
+                            with st.expander("Downloaded and readable sources", expanded=False):
+                                st.dataframe(readable_df, width="stretch", hide_index=True)
+                        if not low_text_df.empty:
+                            with st.expander("Downloaded but scan/low-text sources", expanded=True):
+                                st.dataframe(low_text_df[["why", "chars", "category", "title", "pdf_path"]], width="stretch", hide_index=True)
+                        if not missing_df.empty:
+                            with st.expander("Missing PDFs and reason", expanded=True):
+                                st.dataframe(missing_df[["why", "pdf_available", "category", "title", "source"]], width="stretch", hide_index=True)
+                    else:
+                        st.info("Click the download button to see which selected PDFs are downloaded, low-text, or missing.")
+
+                    with st.expander("APA 7 reference preview", expanded=False):
+                        preview_papers = st.session_state.get("selected_papers", [])
+                        for paper in preview_papers:
+                            if include_in_final_references(paper):
+                                st.write(format_apa_reference(paper))
+                                missing_parts = reference_metadata_missing(paper)
+                                if missing_parts and paper.get("category") != "Thesis":
+                                    st.caption("Missing metadata not invented: " + ", ".join(missing_parts))
+                        skipped_theses = [
+                            paper for paper in preview_papers
+                            if (paper.get("category") == "Thesis" and not include_in_final_references(paper))
+                        ]
+                        if skipped_theses:
+                            st.caption(
+                                f"{len(skipped_theses)} thesis document(s) are used for source mining only; "
+                                "their extracted original bibliography entries are included below when available."
+                            )
+                        mined_rows = source_mined_reference_leads(preview_papers)
+                        if mined_rows:
+                            st.markdown("**Source-mined references included from selected bibliographies/citation maps**")
+                            st.caption("These entries do not require DOI or link. Missing components are kept as extracted rather than invented.")
+                            st.dataframe(
+                                pd.DataFrame(
+                                    [
+                                        {
+                                            "citation": row.get("citation", ""),
+                                            "source": row.get("source_citation", ""),
+                                            "mined_from": row.get("source_category", ""),
+                                            "reference_entry": row.get("reference_lead", ""),
+                                        }
+                                        for row in mined_rows
+                                    ]
+                                ),
+                                width="stretch",
+                                hide_index=True,
+                            )
 
 
 with tabs[3]:
