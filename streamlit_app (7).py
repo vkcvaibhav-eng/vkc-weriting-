@@ -40,6 +40,7 @@ from logic import (
     load_sau_icar_results_prompt,
     load_writing_style_contract,
     merge_search_results,
+    compact_style_profile_for_api,
     recommend_writing_style,
     reference_metadata_missing,
     rerank_papers_after_gemini,
@@ -251,6 +252,15 @@ def current_style_library() -> dict:
     return (current_style_contract().get("styles") or {})
 
 
+def analysis_with_current_style(analysis: dict | None = None) -> dict:
+    enriched = dict(analysis or {})
+    profile = current_style_profile()
+    if profile:
+        enriched["selected_style_name"] = profile.get("author") or st.session_state.get("active_style_name", "")
+        enriched["selected_style_profile"] = compact_style_profile_for_api(profile, "planning")
+    return enriched
+
+
 def current_input_values() -> dict:
     return {
         "paper_title": st.session_state.get("paper_title", "").strip(),
@@ -391,6 +401,7 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
     analysis["discussion_word_count"] = length_config["discussion_target_word_count"]
     result_title = inputs["paper_title"] or analysis.get("generated_title") or "Research Paper Draft"
     analysis["analysis_title"] = result_title
+    analysis = analysis_with_current_style(analysis)
     styles = current_style_library()
     common = section_prompt_common(
         result_title,
@@ -442,6 +453,7 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         claude_model=st.session_state.claude_model,
     )
     analysis["discussion_framework"] = discussion_framework
+    analysis = analysis_with_current_style(analysis)
 
     base_queries = generate_search_queries(
         st.session_state.openai_key,
@@ -1032,6 +1044,7 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
                 "key_finding_match": paper.get("key_finding_match", 0),
                 "discussion_match": paper.get("discussion_focus_match", 0),
                 "biology_match": paper.get("biology_match", 0),
+                "style_fit": paper.get("style_fit_score", 0),
                 "gemini_evidence": paper.get("gemini_evidence_score", 0),
                 "section": paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", "")),
                 "category": paper.get("category", "Research Article"),
@@ -1063,6 +1076,7 @@ PAPER_TABLE_DISABLED_COLUMNS = [
     "key_finding_match",
     "discussion_match",
     "biology_match",
+    "style_fit",
     "gemini_evidence",
     "section",
     "category",
@@ -1102,6 +1116,7 @@ def paper_selection_editor(papers: list[dict], key: str) -> pd.DataFrame:
             "key_finding_match": st.column_config.NumberColumn("Key finding", width="small"),
             "discussion_match": st.column_config.NumberColumn("Disc. focus", width="small"),
             "biology_match": st.column_config.NumberColumn("Biology", width="small"),
+            "style_fit": st.column_config.NumberColumn("Style fit", width="small"),
             "gemini_evidence": st.column_config.NumberColumn("Gemini", width="small"),
         },
         key=key,
@@ -1644,6 +1659,11 @@ with tabs[2]:
                     if discussion_framework.get("discussion_thesis"):
                         st.write("Discussion thesis")
                         st.write(discussion_framework.get("discussion_thesis"))
+                    style_evidence_priorities = discussion_framework.get("style_evidence_priorities") or []
+                    if style_evidence_priorities:
+                        st.write("Style evidence priorities")
+                        for item in style_evidence_priorities:
+                            st.write(item)
                     paragraph_framework = discussion_framework.get("paragraph_framework") or []
                     if paragraph_framework:
                         st.write("Paragraph framework")
@@ -1716,19 +1736,20 @@ with tabs[2]:
         with st.expander("How references are ranked", expanded=False):
             st.write(
                 "Ranking now prioritizes objective match, focused key-finding match, discussion-focus match, "
-                "crop/pest/treatment/outcome biology, PDF/readability, citations, year, and source quality. "
+                "crop/pest/treatment/outcome biology, selected-author style fit, PDF/readability, citations, year, and source quality. "
                 "Papers that only match statistical design terms such as RBD, CRD, ANOVA, CD, SEm, or DMRT are penalized."
             )
             st.write(
                 "After Gemini reads selected sources, the app reranks them again using actual extraction evidence "
-                "from research-paper Discussions, review sections, and thesis RoL blocks."
+                "from research-paper Discussions, review sections, thesis RoL blocks, and usefulness for the selected writing style."
             )
         if st.session_state.get("queries"):
             with st.expander("Queries to search", expanded=True):
                 for query in st.session_state.queries:
                     st.code(query, language="text")
             if st.button("Search papers using these planned queries", type="primary", width="stretch"):
-                analysis = st.session_state.get("analysis") or {}
+                analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
+                st.session_state.analysis = analysis
                 context_text = current_context_text(inputs, extracted_files, analysis)
                 with st.spinner("Searching, deduplicating, scoring, and tagging papers by manuscript section..."):
                     search_result = search_and_rank_papers(
@@ -1813,7 +1834,7 @@ with tabs[2]:
         if not papers:
             st.info("Run Reference Finding first. Search results will appear here for separate selection.")
         else:
-            analysis = st.session_state.get("analysis") or {}
+            analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
             search_result = annotate_search_result_with_evidence_plan(
                 search_result,
                 analysis,
@@ -2110,7 +2131,9 @@ with tabs[3]:
             if not st.session_state.gemini_key:
                 st.error("Enter a Google Gemini API key in the sidebar first.")
             else:
-                context_text = current_context_text(inputs, extracted_files)
+                analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
+                st.session_state.analysis = analysis
+                context_text = current_context_text(inputs, extracted_files, analysis)
                 source_papers = downloaded_refs or selected_papers
                 unread_papers = [paper for paper in source_papers if not paper.get("gemini_note")]
                 already_read_count = len(source_papers) - len(unread_papers)
@@ -2143,10 +2166,12 @@ with tabs[3]:
                     st.session_state.paper_search["papers"] = [
                         by_id.get(str(paper.get("paper_id")), paper) for paper in st.session_state.paper_search["papers"]
                     ]
+                analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
+                st.session_state.analysis = analysis
                 reranked_selected = rerank_papers_after_gemini(
                     st.session_state.selected_papers,
-                    current_context_text(inputs, extracted_files, st.session_state.get("analysis") or {}),
-                    st.session_state.get("analysis") or {},
+                    current_context_text(inputs, extracted_files, analysis),
+                    analysis,
                 )
                 st.session_state.selected_papers = reranked_selected
                 selected_rank_by_id = {str(item.get("paper_id")): item for item in reranked_selected}
@@ -2197,16 +2222,19 @@ with tabs[3]:
                 with st.expander("Original references cited inside research-paper Discussions", expanded=True):
                     for lead in research_discussion_leads[:30]:
                         st.write(lead)
+                analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
                 research_discussion_queries = source_mined_primary_study_search_queries(
                     research_discussion_leads + research_discussion_map,
-                    current_context_text(inputs, extracted_files),
+                    current_context_text(inputs, extracted_files, analysis),
                 )
                 if research_discussion_queries:
                     with st.expander("Primary-paper search queries from research Discussion citations", expanded=False):
                         for query in research_discussion_queries:
                             st.code(query, language="text")
                     if st.button("Search original papers from research Discussion citations now", type="primary", width="stretch"):
-                        context_text = current_context_text(inputs, extracted_files)
+                        analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
+                        st.session_state.analysis = analysis
+                        context_text = current_context_text(inputs, extracted_files, analysis)
                         with st.spinner("Searching original papers cited inside selected research-paper Discussions..."):
                             extra_search = search_and_rank_papers(
                                 queries=research_discussion_queries,
@@ -2221,11 +2249,11 @@ with tabs[3]:
                                 reference_count=st.session_state.reference_count,
                                 per_query_limit=st.session_state.per_query_limit,
                                 use_ai_scoring=st.session_state.use_ai_scoring,
-                                analysis=st.session_state.get("analysis") or {},
+                                analysis=analysis,
                             )
                         extra_search = annotate_search_result_with_evidence_plan(
                             extra_search,
-                            st.session_state.get("analysis") or {},
+                            analysis,
                             research_discussion_queries,
                         )
                         st.session_state.paper_search = merge_search_results(
@@ -2235,7 +2263,7 @@ with tabs[3]:
                         )
                         st.session_state.paper_search = annotate_search_result_with_evidence_plan(
                             st.session_state.paper_search,
-                            st.session_state.get("analysis") or {},
+                            analysis,
                             st.session_state.get("queries", []),
                         )
                         st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
@@ -2287,16 +2315,19 @@ with tabs[3]:
                 with st.expander("Primary-study leads extracted from review bibliographies", expanded=True):
                     for lead in review_primary_leads[:30]:
                         st.write(lead)
+                analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
                 review_queries = review_primary_study_search_queries(
                     review_primary_leads,
-                    current_context_text(inputs, extracted_files),
+                    current_context_text(inputs, extracted_files, analysis),
                 )
                 if review_queries:
                     with st.expander("Primary-paper search queries from review bibliographies", expanded=False):
                         for query in review_queries:
                             st.code(query, language="text")
                     if st.button("Search original papers from review references now", type="primary", width="stretch"):
-                        context_text = current_context_text(inputs, extracted_files)
+                        analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
+                        st.session_state.analysis = analysis
+                        context_text = current_context_text(inputs, extracted_files, analysis)
                         with st.spinner("Searching original primary papers named or implied in review bibliographies..."):
                             extra_search = search_and_rank_papers(
                                 queries=review_queries,
@@ -2311,11 +2342,11 @@ with tabs[3]:
                                 reference_count=st.session_state.reference_count,
                                 per_query_limit=st.session_state.per_query_limit,
                                 use_ai_scoring=st.session_state.use_ai_scoring,
-                                analysis=st.session_state.get("analysis") or {},
+                                analysis=analysis,
                             )
                         extra_search = annotate_search_result_with_evidence_plan(
                             extra_search,
-                            st.session_state.get("analysis") or {},
+                            analysis,
                             review_queries,
                         )
                         st.session_state.paper_search = merge_search_results(
@@ -2325,7 +2356,7 @@ with tabs[3]:
                         )
                         st.session_state.paper_search = annotate_search_result_with_evidence_plan(
                             st.session_state.paper_search,
-                            st.session_state.get("analysis") or {},
+                            analysis,
                             st.session_state.get("queries", []),
                         )
                         st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
@@ -2359,16 +2390,19 @@ with tabs[3]:
                 with st.expander("Primary-study leads extracted from thesis source sections", expanded=True):
                     for lead in primary_leads[:30]:
                         st.write(lead)
+                analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
                 rol_queries = thesis_primary_study_search_queries(
                     primary_leads,
-                    current_context_text(inputs, extracted_files),
+                    current_context_text(inputs, extracted_files, analysis),
                 )
                 if rol_queries:
                     with st.expander("Primary-paper search queries from thesis source leads", expanded=False):
                         for query in rol_queries:
                             st.code(query, language="text")
                     if st.button("Search original papers from thesis source leads now", type="primary", width="stretch"):
-                        context_text = current_context_text(inputs, extracted_files)
+                        analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
+                        st.session_state.analysis = analysis
+                        context_text = current_context_text(inputs, extracted_files, analysis)
                         with st.spinner("Searching original primary papers named or implied in thesis source sections..."):
                             extra_search = search_and_rank_papers(
                                 queries=rol_queries,
@@ -2383,11 +2417,11 @@ with tabs[3]:
                                 reference_count=st.session_state.reference_count,
                                 per_query_limit=st.session_state.per_query_limit,
                                 use_ai_scoring=st.session_state.use_ai_scoring,
-                                analysis=st.session_state.get("analysis") or {},
+                                analysis=analysis,
                             )
                         extra_search = annotate_search_result_with_evidence_plan(
                             extra_search,
-                            st.session_state.get("analysis") or {},
+                            analysis,
                             rol_queries,
                         )
                         st.session_state.paper_search = merge_search_results(
@@ -2397,7 +2431,7 @@ with tabs[3]:
                         )
                         st.session_state.paper_search = annotate_search_result_with_evidence_plan(
                             st.session_state.paper_search,
-                            st.session_state.get("analysis") or {},
+                            analysis,
                             st.session_state.get("queries", []),
                         )
                         st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
@@ -2422,7 +2456,9 @@ with tabs[3]:
             if not (st.session_state.claude_key or st.session_state.gemini_key or st.session_state.openai_key):
                 st.error("Enter a Claude, Gemini, or OpenAI key first.")
             else:
-                context_text = current_context_text(inputs, extracted_files)
+                analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
+                st.session_state.analysis = analysis
+                context_text = current_context_text(inputs, extracted_files, analysis)
                 with st.spinner("Checking what extra evidence or data would improve the selected-author-style paper..."):
                     st.session_state.followup_suggestions = suggest_style_aligned_followup_needs(
                         context_text=context_text,
@@ -2463,7 +2499,9 @@ with tabs[3]:
                     for query in search_queries:
                         st.code(query, language="text")
                 if st.button("Search suggested evidence now", type="primary", width="stretch"):
-                    context_text = current_context_text(inputs, extracted_files)
+                    analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
+                    st.session_state.analysis = analysis
+                    context_text = current_context_text(inputs, extracted_files, analysis)
                     with st.spinner("Searching suggested evidence with the same scholarly search engine..."):
                         extra_search = search_and_rank_papers(
                             queries=search_queries,
@@ -2478,11 +2516,11 @@ with tabs[3]:
                             reference_count=st.session_state.reference_count,
                             per_query_limit=st.session_state.per_query_limit,
                             use_ai_scoring=st.session_state.use_ai_scoring,
-                            analysis=st.session_state.get("analysis") or {},
+                            analysis=analysis,
                         )
                     extra_search = annotate_search_result_with_evidence_plan(
                         extra_search,
-                        st.session_state.get("analysis") or {},
+                        analysis,
                         search_queries,
                     )
                     st.session_state.paper_search = merge_search_results(
@@ -2492,7 +2530,7 @@ with tabs[3]:
                     )
                     st.session_state.paper_search = annotate_search_result_with_evidence_plan(
                         st.session_state.paper_search,
-                        st.session_state.get("analysis") or {},
+                        analysis,
                         st.session_state.get("queries", []),
                     )
                     st.session_state.selected_papers = st.session_state.paper_search.get("selected", [])
