@@ -196,6 +196,14 @@ def init_state() -> None:
         "use_ai_scoring": True,
         "writing_length_mode": "Concise style-preserving",
         "target_word_count": 3750,
+        "paper_length_option": "Medium paper",
+        "custom_paper_word_count": 2000,
+        "discussion_length_option": "Follow paper length",
+        "custom_discussion_word_count": 700,
+        "discussion_target_word_count": 0,
+        "study_objective": "",
+        "focused_key_findings": "",
+        "discussion_focus": "",
         "extracted_files": [],
         "active_style_name": "Anthony M. Shelton",
         "active_style_path": DEFAULT_SHELTON_STYLE_PATH,
@@ -249,6 +257,9 @@ def current_input_values() -> dict:
         "affiliation": st.session_state.get("affiliation", "").strip(),
         "target_journal": st.session_state.get("target_journal", "").strip(),
         "research_area": st.session_state.get("research_area", "").strip(),
+        "study_objective": st.session_state.get("study_objective", "").strip(),
+        "focused_key_findings": st.session_state.get("focused_key_findings", "").strip(),
+        "discussion_focus": st.session_state.get("discussion_focus", "").strip(),
         "master_context": st.session_state.get("master_context", "").strip(),
         "raw_methodology": st.session_state.get("raw_methodology", "").strip(),
     }
@@ -273,9 +284,96 @@ def draft_body_word_count(draft: dict) -> int:
     return sum(draft_section_word_counts(draft).values())
 
 
+PAPER_LENGTH_PRESETS = {
+    "Short paper": {
+        "range": "800-1200 words",
+        "target": 1000,
+        "mode": "Very concise style-preserving",
+        "note": "Brief report writing; concise Discussion with major findings and 2-3 supporting references.",
+    },
+    "Medium paper": {
+        "range": "1500-2500 words",
+        "target": 2000,
+        "mode": "Concise style-preserving",
+        "note": "Standard research-paper format with treatment interpretation, comparisons, biological explanation, and practical relevance.",
+    },
+    "Detailed paper": {
+        "range": "3000-5000 words",
+        "target": 4000,
+        "mode": "Standard detailed",
+        "note": "Detailed manuscript or thesis-chapter style with expanded comparison, mechanism explanation, and implications.",
+    },
+    "Custom word count": {
+        "range": "manual",
+        "target": 2500,
+        "mode": "Concise style-preserving",
+        "note": "Manual full-paper word target with section-wise distribution.",
+    },
+}
+
+DISCUSSION_LENGTH_PRESETS = {
+    "Follow paper length": 0,
+    "Short discussion": 350,
+    "Medium discussion": 750,
+    "Detailed discussion": 1400,
+    "Custom discussion word count": 0,
+}
+
+
+def apply_length_controls() -> dict:
+    paper_option = st.session_state.get("paper_length_option", "Medium paper")
+    if paper_option not in PAPER_LENGTH_PRESETS:
+        paper_option = "Medium paper"
+        st.session_state.paper_length_option = paper_option
+    preset = PAPER_LENGTH_PRESETS[paper_option]
+    if paper_option == "Custom word count":
+        target = int(st.session_state.get("custom_paper_word_count", preset["target"]) or preset["target"])
+        if target <= 1200:
+            mode = "Very concise style-preserving"
+        elif target >= 3000:
+            mode = "Standard detailed"
+        else:
+            mode = "Concise style-preserving"
+    else:
+        target = preset["target"]
+        mode = preset["mode"]
+
+    discussion_option = st.session_state.get("discussion_length_option", "Follow paper length")
+    if discussion_option not in DISCUSSION_LENGTH_PRESETS:
+        discussion_option = "Follow paper length"
+        st.session_state.discussion_length_option = discussion_option
+    if discussion_option == "Custom discussion word count":
+        discussion_target = int(st.session_state.get("custom_discussion_word_count", 700) or 700)
+    else:
+        discussion_target = DISCUSSION_LENGTH_PRESETS[discussion_option]
+
+    st.session_state.target_word_count = max(800, min(8000, int(target)))
+    st.session_state.discussion_target_word_count = max(0, min(3500, int(discussion_target or 0)))
+    st.session_state.writing_length_mode = mode
+    return {
+        "paper_option": paper_option,
+        "paper_range": preset["range"],
+        "paper_note": preset["note"],
+        "target_word_count": st.session_state.target_word_count,
+        "discussion_option": discussion_option,
+        "discussion_target_word_count": st.session_state.discussion_target_word_count,
+        "writing_length_mode": mode,
+        "section_budget": section_word_budget(st.session_state.target_word_count, st.session_state.discussion_target_word_count),
+    }
+
+
 def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]:
     result_text = combined_uploaded_text(files)
-    context_text = inputs["master_context"] + "\n" + inputs["raw_methodology"]
+    length_config = apply_length_controls()
+    context_text = "\n".join(
+        [
+            inputs.get("study_objective", ""),
+            inputs.get("focused_key_findings", ""),
+            inputs.get("discussion_focus", ""),
+            inputs["master_context"],
+            inputs["raw_methodology"],
+        ]
+    )
     analysis = analyze_research_context(
         st.session_state.openai_key,
         st.session_state.model,
@@ -284,7 +382,12 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         inputs["master_context"],
         inputs["raw_methodology"],
         result_text,
+        user_objective=inputs.get("study_objective", ""),
+        focused_key_findings=inputs.get("focused_key_findings", ""),
+        discussion_focus=inputs.get("discussion_focus", ""),
     )
+    analysis["paper_length_label"] = length_config["paper_option"]
+    analysis["discussion_word_count"] = length_config["discussion_target_word_count"]
     result_title = inputs["paper_title"] or analysis.get("generated_title") or "Research Paper Draft"
     analysis["analysis_title"] = result_title
     styles = current_style_library()
@@ -296,7 +399,11 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         inputs.get("master_context", ""),
         analysis,
         result_text,
-        writing_length_directive(st.session_state.writing_length_mode, st.session_state.target_word_count),
+        writing_length_directive(
+            st.session_state.writing_length_mode,
+            st.session_state.target_word_count,
+            st.session_state.discussion_target_word_count,
+        ),
     )
     tables = collect_tables(files)
     images = collect_images(files)
@@ -384,6 +491,9 @@ def current_context_text(inputs: dict, files, analysis: dict | None = None) -> s
         [
             inputs.get("paper_title", ""),
             inputs.get("research_area", ""),
+            inputs.get("study_objective", ""),
+            inputs.get("focused_key_findings", ""),
+            inputs.get("discussion_focus", ""),
             inputs.get("master_context", ""),
             inputs.get("raw_methodology", ""),
             result_text,
@@ -960,6 +1070,7 @@ def paper_selection_editor(papers: list[dict], key: str) -> pd.DataFrame:
 
 
 init_state()
+apply_length_controls()
 
 with st.sidebar:
     st.header("API Settings")
@@ -986,25 +1097,15 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Writing Length")
-    length_modes = ["Concise style-preserving", "Very concise style-preserving", "Standard detailed"]
-    current_length_mode = st.session_state.get("writing_length_mode", "Concise style-preserving")
-    if current_length_mode not in length_modes:
-        current_length_mode = "Concise style-preserving"
-    st.session_state.writing_length_mode = st.selectbox(
-        "Draft length mode",
-        length_modes,
-        index=length_modes.index(current_length_mode),
+    word_budget = section_word_budget(
+        st.session_state.get("target_word_count", 2000),
+        st.session_state.get("discussion_target_word_count", 0),
     )
-    st.session_state.target_word_count = st.slider(
-        "Research article target words",
-        min_value=2500,
-        max_value=6000,
-        value=int(st.session_state.get("target_word_count", 3750)),
-        step=250,
-    )
-    word_budget = section_word_budget(st.session_state.target_word_count)
+    st.caption("Set paper length and discussion depth in Inputs -> Scientific Focus and Length Control.")
+    st.metric("Paper target", f"{st.session_state.get('target_word_count', 2000)} words")
+    discussion_target = st.session_state.get("discussion_target_word_count", 0)
+    st.metric("Discussion target", f"{discussion_target or word_budget['discussion']} words")
     st.caption(
-        "Default 3500-4000 words is suitable for a compact research article. "
         "Target excludes references, tables, captions, and appendices."
     )
     with st.expander("Section word budget", expanded=False):
@@ -1062,6 +1163,78 @@ with tabs[0]:
             st.text_input("Target journal", key="target_journal")
         with meta_cols[1]:
             st.text_input("Research area / discipline", key="research_area", placeholder="Agricultural entomology")
+
+        st.subheader("Scientific Focus and Length Control")
+        st.text_area(
+            "Objective of the study",
+            key="study_objective",
+            height=90,
+            placeholder="Example: To evaluate the efficacy of different acaricides against spider mite on okra.",
+        )
+        st.text_area(
+            "Focused key findings",
+            key="focused_key_findings",
+            height=110,
+            placeholder="Example: Etoxazole recorded the lowest mite population and highest yield, followed by fenazaquin and propargite.",
+        )
+        st.text_area(
+            "Discussion focus",
+            key="discussion_focus",
+            height=110,
+            placeholder=(
+                "Example: Focus on treatment efficacy, possible mode of action, comparison with earlier studies, "
+                "biological explanation, and practical recommendation."
+            ),
+        )
+        length_cols = st.columns(2)
+        with length_cols[0]:
+            st.selectbox(
+                "Required paper length",
+                list(PAPER_LENGTH_PRESETS.keys()),
+                key="paper_length_option",
+                help="Controls whole-paper target words and writing depth.",
+            )
+            if st.session_state.paper_length_option == "Custom word count":
+                st.number_input(
+                    "Custom full-paper word count",
+                    min_value=800,
+                    max_value=8000,
+                    step=100,
+                    key="custom_paper_word_count",
+                )
+        with length_cols[1]:
+            st.selectbox(
+                "Discussion length / depth",
+                list(DISCUSSION_LENGTH_PRESETS.keys()),
+                key="discussion_length_option",
+                help="Use Follow paper length unless the Discussion needs a separate target.",
+            )
+            if st.session_state.discussion_length_option == "Custom discussion word count":
+                st.number_input(
+                    "Custom discussion word count",
+                    min_value=150,
+                    max_value=3500,
+                    step=50,
+                    key="custom_discussion_word_count",
+                )
+        length_config = apply_length_controls()
+        budget = length_config["section_budget"]
+        st.caption(
+            f"{length_config['paper_option']} ({length_config['paper_range']}): "
+            f"target about {length_config['target_word_count']} words; "
+            f"Discussion about {budget['discussion']} words. {length_config['paper_note']}"
+        )
+        with st.expander("Current section word distribution", expanded=False):
+            st.write(
+                {
+                    "Abstract": budget["abstract"],
+                    "Introduction": budget["introduction"],
+                    "Materials and Methods": budget["materials_and_methods"],
+                    "Results": budget["results"],
+                    "Discussion": budget["discussion"],
+                    "Conclusion": budget["conclusion"],
+                }
+            )
 
         st.subheader("Core Inputs")
         st.text_area(
@@ -1145,7 +1318,13 @@ with tabs[0]:
                             st.write(image["summary"])
 
         if inputs_for_style := current_input_values():
-            if inputs_for_style["master_context"] or inputs_for_style["raw_methodology"] or extracted_files:
+            if (
+                inputs_for_style["study_objective"]
+                or inputs_for_style["focused_key_findings"]
+                or inputs_for_style["master_context"]
+                or inputs_for_style["raw_methodology"]
+                or extracted_files
+            ):
                 st.divider()
                 if st.button("Suggest best author style from current inputs", width="stretch"):
                     context_text = current_context_text(inputs_for_style, extracted_files)
@@ -1224,7 +1403,13 @@ with tabs[1]:
     if suggest_clicked:
         inputs = current_input_values()
         extracted_files = current_extracted_files()
-        if not (inputs["master_context"] or inputs["raw_methodology"] or extracted_files):
+        if not (
+            inputs["study_objective"]
+            or inputs["focused_key_findings"]
+            or inputs["master_context"]
+            or inputs["raw_methodology"]
+            or extracted_files
+        ):
             st.warning("Add methodology, master context, or result files first.")
         else:
             context_text = current_context_text(inputs, extracted_files)
@@ -1340,7 +1525,13 @@ with tabs[2]:
             "Write the Results first, build the Discussion framework, and prepare the style-aware search queries before reference searching."
         )
         if st.button("Analyze findings, write Results, and build Discussion Framework", type="primary", width="stretch"):
-            if not (inputs["master_context"] or inputs["raw_methodology"] or extracted_files):
+            if not (
+                inputs["study_objective"]
+                or inputs["focused_key_findings"]
+                or inputs["master_context"]
+                or inputs["raw_methodology"]
+                or extracted_files
+            ):
                 st.warning("Add methodology, master context, or result files before analyzing.")
             else:
                 with st.spinner(
@@ -1365,6 +1556,18 @@ with tabs[2]:
                 if analysis_state.get("objective"):
                     st.write("Objective")
                     st.write(analysis_state.get("objective"))
+                if analysis_state.get("focused_key_findings"):
+                    st.write("Focused key findings")
+                    st.write(analysis_state.get("focused_key_findings"))
+                if analysis_state.get("discussion_focus"):
+                    st.write("Discussion focus")
+                    st.write(analysis_state.get("discussion_focus"))
+                if analysis_state.get("paper_length_label"):
+                    st.write("Length control")
+                    st.write(
+                        f"{analysis_state.get('paper_length_label')} | Discussion target: "
+                        f"{analysis_state.get('discussion_word_count') or 'auto'} words"
+                    )
                 for label, key in [
                     ("Treatments / variables", "treatments_variables"),
                     ("Major findings", "major_findings"),
@@ -2369,7 +2572,13 @@ with tabs[4]:
     if st.button("Generate selected-style full paper draft", type="primary", width="stretch"):
         if not st.session_state.openai_key:
             st.error("Enter an OpenAI API key in the sidebar before drafting.")
-        elif not (inputs["master_context"] or inputs["raw_methodology"] or extracted_files):
+        elif not (
+            inputs["study_objective"]
+            or inputs["focused_key_findings"]
+            or inputs["master_context"]
+            or inputs["raw_methodology"]
+            or extracted_files
+        ):
             st.warning("Add methodology, master context, or result files before drafting.")
         else:
             if not current_style_library():
@@ -2396,6 +2605,11 @@ with tabs[4]:
                         selected_papers=selected_papers,
                         writing_length_mode=st.session_state.writing_length_mode,
                         target_word_count=st.session_state.target_word_count,
+                        discussion_word_count=st.session_state.discussion_target_word_count,
+                        user_objective=inputs["study_objective"],
+                        focused_key_findings=inputs["focused_key_findings"],
+                        discussion_focus=inputs["discussion_focus"],
+                        paper_length_label=st.session_state.paper_length_option,
                     )
                     st.session_state.draft = draft
                     st.session_state.docx_bytes = None
@@ -2414,7 +2628,21 @@ with tabs[4]:
             st.caption(f"Writing length: {draft.get('writing_length_mode')}")
         if draft.get("target_word_count"):
             st.caption(f"Target article length: about {draft.get('target_word_count')} words, excluding references and tables.")
+            if draft.get("discussion_word_count"):
+                st.caption(f"Target Discussion length: about {draft.get('discussion_word_count')} words.")
             st.caption(f"Estimated generated body length: {draft_body_word_count(draft)} words.")
+        draft_analysis = draft.get("analysis") or {}
+        if any(draft_analysis.get(key) for key in ["user_objective", "focused_key_findings", "discussion_focus"]):
+            with st.expander("Scientific focus used for this draft", expanded=True):
+                if draft_analysis.get("user_objective"):
+                    st.write("Objective")
+                    st.write(draft_analysis.get("user_objective"))
+                if draft_analysis.get("focused_key_findings"):
+                    st.write("Focused key findings")
+                    st.write(draft_analysis.get("focused_key_findings"))
+                if draft_analysis.get("discussion_focus"):
+                    st.write("Discussion focus")
+                    st.write(draft_analysis.get("discussion_focus"))
         if draft.get("section_word_budget"):
             with st.expander("Target vs generated section word counts", expanded=False):
                 budget = draft.get("section_word_budget") or {}

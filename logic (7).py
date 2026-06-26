@@ -1755,13 +1755,20 @@ def analyze_research_context(
     master_context: str,
     raw_methodology: str,
     result_text: str,
+    user_objective: str = "",
+    focused_key_findings: str = "",
+    discussion_focus: str = "",
 ) -> dict[str, Any]:
     fallback_title = paper_title.strip() or "Research Paper Draft"
+    supplied_focus_text = " ".join([user_objective, focused_key_findings, discussion_focus])
     profile_seed = {}
     fallback = {
         "generated_title": fallback_title,
-        "objective": "",
-        "keywords": fallback_keywords(" ".join([paper_title, research_area, master_context, raw_methodology, result_text])),
+        "objective": user_objective.strip(),
+        "user_objective": user_objective.strip(),
+        "focused_key_findings": focused_key_findings.strip(),
+        "discussion_focus": discussion_focus.strip(),
+        "keywords": fallback_keywords(" ".join([paper_title, research_area, supplied_focus_text, master_context, raw_methodology, result_text])),
         "treatments_variables": [],
         "major_findings": [],
         "significant_differences": [],
@@ -1778,7 +1785,7 @@ def analyze_research_context(
     }
     fallback["search_intent_profile"] = build_search_intent_profile(
         fallback,
-        " ".join([paper_title, research_area, master_context, raw_methodology]),
+        " ".join([paper_title, research_area, supplied_focus_text, master_context, raw_methodology]),
         result_text,
     )
     fallback["result_family"] = fallback["search_intent_profile"].get("result_family", "general_if_unclear")
@@ -1791,6 +1798,15 @@ Return a JSON object for a research paper writing app.
 
 Known title: {paper_title or "not supplied"}
 Research area: {research_area or "not supplied"}
+User-provided objective of the study:
+{truncate_text(user_objective, 1500) or "not supplied"}
+
+User-provided focused key findings:
+{truncate_text(focused_key_findings, 2500) or "not supplied"}
+
+User-provided discussion focus:
+{truncate_text(discussion_focus, 2500) or "not supplied"}
+
 Master context:
 {truncate_text(master_context, 5000)}
 
@@ -1803,10 +1819,15 @@ Result evidence:
 JSON keys:
 generated_title, objective, keywords, treatments_variables, major_findings, significant_differences,
 result_patterns, treatment_rankings, research_questions, discussion_needs, search_queries,
-search_intent_profile, rejected_query_terms, result_family, result_summary.
+search_intent_profile, rejected_query_terms, result_family, result_summary, user_objective,
+focused_key_findings, discussion_focus.
 Use only supplied facts. If title is missing, create a concise scientific title.
+If the user supplied an objective, keep it as the primary objective unless the wording only needs light scientific cleanup.
+Give stronger weight to focused_key_findings when deciding discussion_needs and search_queries; do not give every minor
+table result equal discussion priority when the user identified the key findings.
 Create 5 to 8 search_queries that will find papers useful for discussion and references.
-The search_queries and discussion_needs must be driven by the actual results, not generic topic coverage.
+The search_queries and discussion_needs must be driven by the objective, focused key findings, and actual results,
+not generic topic coverage.
 Do not include statistical tests, experimental designs, software names, replication, ANOVA, RBD, CRD,
 paired t-test, CD, SEm, DMRT, or broad statistical analysis in literature search queries unless the
 paper topic is statistical methodology.
@@ -1826,9 +1847,14 @@ and optional_terms.
         parsed = parse_json_object(text, fallback)
         for key, value in fallback.items():
             parsed.setdefault(key, value)
+        if user_objective.strip():
+            parsed["objective"] = user_objective.strip()
+            parsed["user_objective"] = user_objective.strip()
+        parsed["focused_key_findings"] = focused_key_findings.strip() or parsed.get("focused_key_findings", "")
+        parsed["discussion_focus"] = discussion_focus.strip() or parsed.get("discussion_focus", "")
         profile = build_search_intent_profile(
             parsed,
-            " ".join([paper_title, research_area, master_context, raw_methodology]),
+            " ".join([paper_title, research_area, supplied_focus_text, master_context, raw_methodology]),
             result_text,
         )
         accepted_queries, report = validate_query_list(parsed.get("search_queries") or [], profile, 8)
@@ -5589,6 +5615,9 @@ Authors/scientists: {authors}
 Affiliation/notes: {affiliation}
 Research area: {research_area}
 Objective: {analysis.get("objective", "")}
+User-provided objective: {analysis.get("user_objective") or analysis.get("objective", "")}
+Focused key findings: {analysis.get("focused_key_findings", "")}
+Discussion focus: {analysis.get("discussion_focus", "")}
 Keywords: {analysis.get("keywords", [])}
 Major findings: {analysis.get("major_findings", [])}
 Treatment rankings: {analysis.get("treatment_rankings", [])}
@@ -5601,15 +5630,22 @@ Result evidence:
 
 Writing length and density directive:
 {writing_length_directive or "Use normal publication length while preserving the selected author style."}
+
+Scientific focus rule:
+- The objective defines the main purpose of the experiment.
+- Focused key findings identify which results need stronger interpretation, literature comparison, and biological justification.
+- Uploaded tables provide numerical support, but the Discussion direction must come primarily from the objective,
+  focused key findings, and user-provided discussion focus.
+- Do not give equal discussion weight to every minor table result when focused key findings are supplied.
 """
 
 
-def section_word_budget(target_word_count: int = 3750) -> dict[str, int]:
+def section_word_budget(target_word_count: int = 3750, discussion_word_count: int = 0) -> dict[str, int]:
     try:
         total = int(target_word_count or 0)
     except Exception:
         total = 3750
-    total = max(2000, min(8000, total))
+    total = max(800, min(8000, total))
     weights = {
         "abstract": 0.06,
         "introduction": 0.17,
@@ -5618,21 +5654,36 @@ def section_word_budget(target_word_count: int = 3750) -> dict[str, int]:
         "discussion": 0.36,
         "conclusion": 0.05,
     }
-    budgets = {section: max(80, int(round(total * weight / 10) * 10)) for section, weight in weights.items()}
+    try:
+        requested_discussion = int(discussion_word_count or 0)
+    except Exception:
+        requested_discussion = 0
+    if requested_discussion > 0:
+        discussion_budget = max(150, min(requested_discussion, max(150, total - 350)))
+        remaining = max(0, total - discussion_budget)
+        other_weights = {key: value for key, value in weights.items() if key != "discussion"}
+        other_total = sum(other_weights.values())
+        budgets = {
+            section: max(50, int(round(remaining * weight / other_total / 10) * 10))
+            for section, weight in other_weights.items()
+        }
+        budgets["discussion"] = discussion_budget
+    else:
+        budgets = {section: max(50, int(round(total * weight / 10) * 10)) for section, weight in weights.items()}
     difference = total - sum(budgets.values())
     budgets["discussion"] = max(120, budgets["discussion"] + difference)
     budgets["total"] = total
     return budgets
 
 
-def target_word_count_directive(target_word_count: int = 0) -> str:
+def target_word_count_directive(target_word_count: int = 0, discussion_word_count: int = 0) -> str:
     try:
         total = int(target_word_count or 0)
     except Exception:
         total = 0
     if total <= 0:
         return ""
-    budgets = section_word_budget(total)
+    budgets = section_word_budget(total, discussion_word_count)
     return f"""
 Whole-paper target length: about {budgets["total"]} words, excluding references, tables, captions, and appendices.
 Stay within approximately +/-10% of this target. Do not pad the paper only to reach the number.
@@ -5647,7 +5698,33 @@ If supplied data are limited, stay shorter rather than inventing detail. If tabl
 """.strip()
 
 
-def writing_length_directive(mode: str = "Concise style-preserving", target_word_count: int = 0) -> str:
+def discussion_length_depth_directive(target_word_count: int = 0, discussion_word_count: int = 0) -> str:
+    budgets = section_word_budget(target_word_count or 3750, discussion_word_count)
+    discussion_budget = budgets.get("discussion", 0)
+    if discussion_budget <= 420 or budgets.get("total", 0) <= 1200:
+        return """
+Discussion depth: short.
+- Use only the major findings and the user's focused key findings.
+- Include concise interpretation, the strongest biological explanation, and about 2-3 supporting references when available.
+- Avoid treatment-by-treatment expansion unless a treatment is central to the focused key findings.
+""".strip()
+    if discussion_budget >= 1100 or budgets.get("total", 0) >= 3000:
+        return """
+Discussion depth: detailed.
+- Give strongest weight to the user's objective and focused key findings.
+- Include detailed treatment comparison for important findings, multiple relevant references, mechanism or mode-of-action explanation,
+  crop/pest-specific justification, agreement or contrast with earlier studies, and practical implications.
+- Still avoid padding and do not expand minor table results that are not central to the objective.
+""".strip()
+    return """
+Discussion depth: medium.
+- Interpret the key treatment/result patterns, compare them with previous studies, explain likely biological or agronomic reasons,
+  and close with practical relevance.
+- Give more space to focused key findings than to minor table results.
+""".strip()
+
+
+def writing_length_directive(mode: str = "Concise style-preserving", target_word_count: int = 0, discussion_word_count: int = 0) -> str:
     mode_clean = (mode or "").strip().lower()
     if "very" in mode_clean:
         base = """
@@ -5681,8 +5758,9 @@ Use a concise, style-preserving manuscript style.
 - Discussion must remain style-led and evidence-based, but focus each paragraph on one major finding and its strongest comparison/implication.
 - Do not omit supplied values, treatments, citations, or methodological details that are necessary for scientific accuracy.
 """.strip()
-    word_directive = target_word_count_directive(target_word_count)
-    return f"{base}\n\n{word_directive}".strip() if word_directive else base
+    word_directive = target_word_count_directive(target_word_count, discussion_word_count)
+    discussion_directive = discussion_length_depth_directive(target_word_count, discussion_word_count)
+    return "\n\n".join(part for part in [base, word_directive, discussion_directive] if part).strip()
 
 
 CONCLUSION_STAT_DETAIL_RE = re.compile(
@@ -6050,6 +6128,11 @@ Comparison and validation vocabulary:
 Structured analysis of uploaded methodology/results:
 {json.dumps(analysis, ensure_ascii=True)[:16000]}
 
+User scientific focus for Discussion:
+- Objective: {analysis.get("user_objective") or analysis.get("objective") or "not supplied"}
+- Focused key findings: {analysis.get("focused_key_findings") or "not supplied"}
+- Discussion focus: {analysis.get("discussion_focus") or "not supplied"}
+
 Selected references and Gemini reading notes:
 {reference_context(selected_papers, target_section="Discussion")}
 
@@ -6067,6 +6150,10 @@ workflow: concise reminder of the results-first discussion workflow.
 
 Rules:
 - Every paragraph framework item must start from a supplied result/finding.
+- When the user supplied focused key findings, build the paragraph framework around those findings first. Do not
+  distribute equal discussion space to every minor table result.
+- The uploaded table values support the framework, but the direction must come mainly from the objective, focused
+  key findings, and discussion focus.
 - Do not invent citations, author names, years, or unsupported mechanisms.
 - Use thesis and review mined bibliography/citation-map entries as citable original references when they are present
   in the reference context with a citation key and reference_entry, even when DOI or link is unavailable.
@@ -6082,6 +6169,10 @@ Rules:
   citation-map references to shape and cite the comparison logic.
 - Make the plan style-led: the rhetorical move should be more than "report finding"; it should frame, validate,
   reconcile, qualify, or extend the finding through related work.
+- Avoid statistical-design-wise comparison with earlier studies. Do not make RBD, CRD, RCBD, factorial design,
+  replication, pot culture, field trial, laboratory design, ANOVA, or software differences the main comparison basis.
+  Compare scientific findings instead: treatment efficacy, pest reduction, yield improvement, dose response, biological
+  activity, mode of action, crop response, agreement/disagreement with previous results, and practical implication.
 """
     system_prompt = "You plan style-led scientific Discussion sections from results and literature evidence."
     if claude_key:
@@ -6156,11 +6247,23 @@ Discussion framework to follow:
 Rules:
 - Academic writing style, framing, and validation rhetoric take precedence over plain logical reporting.
 - Interpret the supplied results and compare them with selected references and citable source-mined references only.
+- The Discussion must be guided mainly by the user-provided objective, focused key findings, and discussion focus.
+  Uploaded table values provide numerical support; they must not become the only source of discussion direction.
+- If focused key findings are supplied, give them stronger interpretation, literature comparison, biological explanation,
+  and practical justification than minor table results.
+- Do not write a random or unnecessarily long Discussion. Match depth to the word budget, objective, focused findings,
+  number of important treatments/observations, crop/pest complexity, and style guide.
 - Evidence-section labels are planning priorities. If an Introduction-planned source also supports a Discussion
   mechanism, comparison, or implication, it may be used here, but the claim must match the evidence.
 - The paragraph order must follow the Discussion framework where possible: finding -> explanation -> validation or contrast
   with related work -> review synthesis where appropriate -> limitation or implication.
 - Each paragraph must justify the finding by contextualizing it with related work, not merely list previous studies.
+- Focus comparisons with earlier studies on scientific findings: treatment efficacy, pest reduction, yield improvement,
+  dose response, biological activity, mode of action, crop response, agreement/disagreement, and practical relevance.
+- Avoid statistical-design-wise comparison. Do not write sentences such as "the present study was conducted in RBD,
+  whereas another author used CRD" unless it is scientifically essential to explain the finding.
+- Do not make RBD, CRD, RCBD, factorial design, pot culture, field trial, laboratory design, replications, ANOVA,
+  or software differences the main basis of literature comparison.
 - Prefer Gemini reading notes and downloaded full_text_excerpt evidence where available; use abstracts only when full text was not downloaded/read.
 - Thesis entries marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY are not allowed citations.
 - Use thesis RoL notes to identify the original primary studies behind the thesis wording. Cite those original studies
@@ -6353,6 +6456,11 @@ def generate_full_draft(
     selected_papers: list[dict[str, Any]],
     writing_length_mode: str = "Concise style-preserving",
     target_word_count: int = 3750,
+    discussion_word_count: int = 0,
+    user_objective: str = "",
+    focused_key_findings: str = "",
+    discussion_focus: str = "",
+    paper_length_label: str = "",
 ) -> dict[str, Any]:
     result_text = combined_uploaded_text(extracted_files)
     analysis = analyze_research_context(
@@ -6363,9 +6471,17 @@ def generate_full_draft(
         master_context,
         raw_methodology,
         result_text,
+        user_objective=user_objective,
+        focused_key_findings=focused_key_findings,
+        discussion_focus=discussion_focus,
     )
+    analysis["user_objective"] = user_objective.strip() or analysis.get("user_objective", "")
+    analysis["focused_key_findings"] = focused_key_findings.strip() or analysis.get("focused_key_findings", "")
+    analysis["discussion_focus"] = discussion_focus.strip() or analysis.get("discussion_focus", "")
+    analysis["paper_length_label"] = paper_length_label
+    analysis["discussion_word_count"] = int(discussion_word_count or 0)
     title = paper_title.strip() or analysis.get("generated_title") or "Research Paper Draft"
-    length_directive = writing_length_directive(writing_length_mode, target_word_count)
+    length_directive = writing_length_directive(writing_length_mode, target_word_count, discussion_word_count)
     common = section_prompt_common(
         title,
         authors,
@@ -6430,8 +6546,10 @@ def generate_full_draft(
         "references": references,
         "source_mined_references": source_mined_references,
         "writing_length_mode": writing_length_mode,
+        "paper_length_label": paper_length_label,
         "target_word_count": target_word_count,
-        "section_word_budget": section_word_budget(target_word_count),
+        "discussion_word_count": discussion_word_count,
+        "section_word_budget": section_word_budget(target_word_count, discussion_word_count),
         "analysis": analysis,
         "tables": tables,
         "images": images,
