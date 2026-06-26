@@ -41,11 +41,13 @@ from logic import (
     load_writing_style_contract,
     merge_search_results,
     recommend_writing_style,
+    reference_metadata_missing,
     revise_draft_with_style_audits,
     review_primary_study_search_queries,
     search_and_rank_papers,
     section_word_budget,
     section_prompt_common,
+    source_mined_reference_leads,
     source_mined_primary_study_search_queries,
     suggest_style_aligned_followup_needs,
     summarize_gemini_reference_notes,
@@ -1703,15 +1705,41 @@ with tabs[2]:
                     st.dataframe(pd.DataFrame(download_rows), width="stretch", hide_index=True)
 
                 with st.expander("APA 7 reference preview", expanded=False):
-                    for paper in st.session_state.get("selected_papers", []):
+                    preview_papers = st.session_state.get("selected_papers", [])
+                    for paper in preview_papers:
                         if include_in_final_references(paper):
                             st.write(format_apa_reference(paper))
+                            missing_parts = reference_metadata_missing(paper)
+                            if missing_parts and paper.get("category") != "Thesis":
+                                st.caption("Missing metadata not invented: " + ", ".join(missing_parts))
                     skipped_theses = [
-                        paper for paper in st.session_state.get("selected_papers", [])
+                        paper for paper in preview_papers
                         if (paper.get("category") == "Thesis" and not include_in_final_references(paper))
                     ]
                     if skipped_theses:
-                        st.caption(f"{len(skipped_theses)} thesis source(s) are used for source mining only and are not shown as final citations.")
+                        st.caption(
+                            f"{len(skipped_theses)} thesis document(s) are used for source mining only; "
+                            "their extracted original bibliography entries are included below when available."
+                        )
+                    mined_rows = source_mined_reference_leads(preview_papers)
+                    if mined_rows:
+                        st.markdown("**Source-mined references included from selected bibliographies/citation maps**")
+                        st.caption("These entries do not require DOI or link. Missing components are kept as extracted rather than invented.")
+                        st.dataframe(
+                            pd.DataFrame(
+                                [
+                                    {
+                                        "citation": row.get("citation", ""),
+                                        "source": row.get("source_citation", ""),
+                                        "mined_from": row.get("source_category", ""),
+                                        "reference_entry": row.get("reference_lead", ""),
+                                    }
+                                    for row in mined_rows
+                                ]
+                            ),
+                            width="stretch",
+                            hide_index=True,
+                        )
 
 
 with tabs[3]:
@@ -2329,6 +2357,24 @@ with tabs[4]:
                 if key == "references":
                     for ref in value:
                         st.write(ref)
+                    mined_rows = draft.get("source_mined_references") or []
+                    if mined_rows:
+                        st.markdown("**Source-mined references included from selected bibliographies/citation maps**")
+                        st.dataframe(
+                            pd.DataFrame(
+                                [
+                                    {
+                                        "citation": row.get("citation", ""),
+                                        "source": row.get("source_citation", ""),
+                                        "mined_from": row.get("source_category", ""),
+                                        "reference_entry": row.get("reference_lead", ""),
+                                    }
+                                    for row in mined_rows
+                                ]
+                            ),
+                            width="stretch",
+                            hide_index=True,
+                        )
                 elif key == "discussion_framework":
                     st.json(value)
                 else:

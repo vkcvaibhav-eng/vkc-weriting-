@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import hashlib
 import io
 import json
@@ -2233,7 +2234,11 @@ def search_openalex(query: str, limit: int = 10) -> list[dict[str, Any]]:
         doi = item.get("doi") or ""
         oa = item.get("open_access") or {}
         primary = item.get("primary_location") or {}
+        biblio = item.get("biblio") or {}
         pdf_url = oa.get("oa_url") or ((primary.get("source") or {}).get("pdf_url") or "")
+        first_page = biblio.get("first_page") or ""
+        last_page = biblio.get("last_page") or ""
+        pages = f"{first_page}-{last_page}" if first_page and last_page else (first_page or last_page or "")
         title = item.get("display_name") or ""
         papers.append(
             {
@@ -2243,6 +2248,13 @@ def search_openalex(query: str, limit: int = 10) -> list[dict[str, Any]]:
                 "year": year,
                 "abstract": openalex_abstract_to_text(item.get("abstract_inverted_index")),
                 "venue": ((primary.get("source") or {}).get("display_name") or ""),
+                "journal": ((primary.get("source") or {}).get("display_name") or ""),
+                "volume": biblio.get("volume") or "",
+                "issue": biblio.get("issue") or "",
+                "pages": pages,
+                "first_page": first_page,
+                "last_page": last_page,
+                "publisher": ((primary.get("source") or {}).get("host_organization_name") or ""),
                 "url": doi or item.get("id") or "",
                 "citation_count": item.get("cited_by_count") or 0,
                 "source": "OpenAlex",
@@ -2438,12 +2450,21 @@ def extract_researchgate_metadata(url: str) -> dict[str, Any]:
     year = coerce_year(meta_value("citation_publication_date") or meta_value("citation_online_date"))
     venue = meta_value("citation_journal_title") or meta_value("citation_conference_title") or "ResearchGate"
     doi = meta_value("citation_doi")
+    first_page = meta_value("citation_firstpage")
+    last_page = meta_value("citation_lastpage")
+    pages = f"{first_page}-{last_page}" if first_page and last_page else (first_page or last_page or "")
     return {
         "title": title,
         "authors": [re.sub(r"\s+", " ", author).strip() for author in authors if author.strip()],
         "year": year,
         "abstract": abstract,
         "venue": venue,
+        "journal": meta_value("citation_journal_title") or "",
+        "volume": meta_value("citation_volume"),
+        "issue": meta_value("citation_issue"),
+        "pages": pages,
+        "first_page": first_page,
+        "last_page": last_page,
         "pdf_url": pdf_url,
         "external_ids": {"DOI": doi} if doi else {},
     }
@@ -2536,6 +2557,11 @@ def normalize_perplexity_candidate(
         "year": coerce_year(item.get("year") or item.get("date")),
         "abstract": str(item.get("abstract") or item.get("summary") or item.get("snippet") or "").strip(),
         "venue": str(item.get("venue") or item.get("journal") or item.get("publisher") or "").strip(),
+        "journal": str(item.get("journal") or "").strip(),
+        "volume": str(item.get("volume") or "").strip(),
+        "issue": str(item.get("issue") or "").strip(),
+        "pages": str(item.get("pages") or item.get("page_range") or "").strip(),
+        "publisher": str(item.get("publisher") or "").strip(),
         "url": url,
         "citation_count": int(item.get("citation_count") or item.get("citations") or 0),
         "source": "Perplexity Sonar",
@@ -2683,7 +2709,20 @@ def deduplicate_papers(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def merge_paper_metadata(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
     merged = dict(primary)
-    for key in ["abstract", "url", "venue", "pdf_url", "year"]:
+    for key in [
+        "abstract",
+        "url",
+        "venue",
+        "journal",
+        "publisher",
+        "volume",
+        "issue",
+        "pages",
+        "first_page",
+        "last_page",
+        "pdf_url",
+        "year",
+    ]:
         if not merged.get(key) and secondary.get(key):
             merged[key] = secondary[key]
     if not merged.get("authors") and secondary.get("authors"):
@@ -2707,6 +2746,143 @@ def merge_paper_metadata(primary: dict[str, Any], secondary: dict[str, Any]) -> 
     else:
         merged["external_ids"] = {**(secondary.get("external_ids") or {}), **merged["external_ids"]}
     return merged
+
+
+def clean_doi_value(value: Any) -> str:
+    doi = re.sub(r"\s+", "", str(value or "").strip())
+    doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi, flags=re.I)
+    doi = re.sub(r"^doi:\s*", "", doi, flags=re.I)
+    return doi.strip(" .")
+
+
+def doi_from_paper(paper: dict[str, Any]) -> str:
+    external_ids = paper.get("external_ids") or {}
+    return clean_doi_value(external_ids.get("DOI") or paper.get("doi") or "")
+
+
+def doi_url_from_paper(paper: dict[str, Any]) -> str:
+    doi = doi_from_paper(paper)
+    return f"https://doi.org/{doi}" if doi else ""
+
+
+def normalize_pages(first_page: Any = "", last_page: Any = "", pages: Any = "") -> str:
+    page_range = re.sub(r"\s+", "", str(pages or "").strip())
+    if page_range:
+        return page_range.replace("--", "-")
+    first = re.sub(r"\s+", "", str(first_page or "").strip())
+    last = re.sub(r"\s+", "", str(last_page or "").strip())
+    if first and last and first != last:
+        return f"{first}-{last}"
+    return first or last
+
+
+def paper_reference_pages(paper: dict[str, Any]) -> str:
+    return normalize_pages(paper.get("first_page"), paper.get("last_page"), paper.get("pages"))
+
+
+def reference_metadata_missing(paper: dict[str, Any]) -> list[str]:
+    missing = []
+    if not (paper.get("journal") or paper.get("venue")):
+        missing.append("journal/venue")
+    if not paper.get("volume"):
+        missing.append("volume")
+    if not paper.get("issue"):
+        missing.append("issue")
+    if not paper_reference_pages(paper):
+        missing.append("pages")
+    return missing
+
+
+def crossref_author_names(authors: list[dict[str, Any]]) -> list[str]:
+    names = []
+    for author in authors or []:
+        given = author.get("given") or ""
+        family = author.get("family") or ""
+        literal = author.get("name") or ""
+        name = f"{given} {family}".strip() or literal
+        if name:
+            names.append(re.sub(r"\s+", " ", name).strip())
+    return names
+
+
+def crossref_year(item: dict[str, Any]) -> int | None:
+    for key in ["published-print", "published-online", "issued", "created"]:
+        parts = ((item.get(key) or {}).get("date-parts") or [])
+        if parts and parts[0]:
+            try:
+                return int(parts[0][0])
+            except Exception:
+                continue
+    return None
+
+
+def crossref_item_to_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    title = " ".join(item.get("title") or []).strip()
+    journal = " ".join(item.get("container-title") or []).strip()
+    doi = clean_doi_value(item.get("DOI") or "")
+    return {
+        "title": title,
+        "authors": crossref_author_names(item.get("author") or []),
+        "year": crossref_year(item),
+        "venue": journal,
+        "journal": journal,
+        "volume": str(item.get("volume") or "").strip(),
+        "issue": str(item.get("issue") or "").strip(),
+        "pages": normalize_pages(pages=item.get("page") or ""),
+        "publisher": str(item.get("publisher") or "").strip(),
+        "url": f"https://doi.org/{doi}" if doi else str(item.get("URL") or "").strip(),
+        "external_ids": {"DOI": doi} if doi else {},
+        "reference_metadata_source": "Crossref",
+    }
+
+
+def enrich_reference_metadata_from_crossref(paper: dict[str, Any]) -> dict[str, Any]:
+    category = paper.get("category") or infer_paper_category(paper)
+    if category == "Thesis" or not reference_metadata_missing(paper):
+        return paper
+    doi = doi_from_paper(paper)
+    title = str(paper.get("title") or "").strip()
+    if not (doi or title):
+        return paper
+    try:
+        if doi:
+            response = requests.get(
+                f"https://api.crossref.org/works/{quote(doi, safe='')}",
+                timeout=12,
+                verify=SSL_VERIFY,
+            )
+            response.raise_for_status()
+            item = (response.json().get("message") or {})
+        else:
+            response = requests.get(
+                "https://api.crossref.org/works",
+                params={"query.bibliographic": title, "rows": 1, "select": "title,author,issued,published-print,published-online,container-title,volume,issue,page,DOI,publisher,URL,type"},
+                timeout=12,
+                verify=SSL_VERIFY,
+            )
+            response.raise_for_status()
+            items = ((response.json().get("message") or {}).get("items") or [])
+            if not items:
+                return paper
+            item = items[0]
+            found_title = " ".join(item.get("title") or [])
+            similarity = difflib.SequenceMatcher(None, normalize_title(title), normalize_title(found_title)).ratio()
+            if similarity < 0.72:
+                return paper
+        metadata = crossref_item_to_metadata(item)
+        enriched = merge_paper_metadata(paper, metadata)
+        enriched["reference_metadata_source"] = metadata.get("reference_metadata_source")
+        enriched["reference_metadata_missing"] = reference_metadata_missing(enriched)
+        return enriched
+    except Exception as exc:
+        enriched = dict(paper)
+        enriched["reference_metadata_warning"] = f"Crossref metadata lookup failed: {exc}"
+        enriched["reference_metadata_missing"] = reference_metadata_missing(enriched)
+        return enriched
+
+
+def enrich_selected_reference_metadata(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [enrich_reference_metadata_from_crossref(paper) for paper in papers]
 
 
 def heuristic_score_paper(paper: dict[str, Any], context_text: str) -> tuple[float, str]:
@@ -3173,6 +3349,7 @@ def search_and_rank_papers(
         ranked = sorted(ranked, key=lambda item: item.get("score", 0), reverse=True)
 
     selected, quota_status = select_ranked_papers_with_targets(ranked, reference_count)
+    selected = enrich_selected_reference_metadata(selected)
     missing = quota_status.get("missing", {})
     for category, count in missing.items():
         if count:
@@ -3733,16 +3910,244 @@ def format_apa_reference(paper: dict[str, Any]) -> str:
     authors = join_apa_authors(paper.get("authors") or [])
     year = paper.get("year") or "n.d."
     title = (paper.get("title") or "Untitled").rstrip(".")
-    venue = (paper.get("venue") or "").strip()
+    category = paper.get("category") or infer_paper_category(paper)
+    venue = (paper.get("journal") or paper.get("venue") or "").strip()
+    volume = str(paper.get("volume") or "").strip()
+    issue = str(paper.get("issue") or "").strip()
+    pages = paper_reference_pages(paper)
     url = (paper.get("url") or "").strip()
-    doi = (paper.get("external_ids") or {}).get("DOI")
-    tail = doi or url
+    doi_url = doi_url_from_paper(paper)
+    tail = doi_url or url
+
+    if category == "Thesis":
+        institution = (paper.get("institution") or paper.get("venue") or "").strip()
+        repository = (paper.get("repository") or paper.get("source") or "").strip()
+        thesis_type = paper.get("thesis_type") or "Doctoral dissertation"
+        reference = f"{authors} ({year}). {title} [{thesis_type}"
+        if institution:
+            reference += f", {institution}"
+        reference += "]."
+        if repository:
+            reference += f" {repository}."
+        if tail:
+            reference += f" {tail}"
+        return re.sub(r"\s+", " ", reference).strip()
+
     reference = f"{authors} ({year}). {title}."
     if venue:
-        reference += f" {venue}."
+        journal_part = f" {venue}"
+        if volume:
+            journal_part += f", {volume}"
+            if issue:
+                journal_part += f"({issue})"
+            if pages:
+                journal_part += f", {pages}"
+        elif pages:
+            journal_part += f", {pages}"
+        journal_part += "."
+        reference += journal_part
     if tail:
         reference += f" {tail}"
     return re.sub(r"\s+", " ", reference).strip()
+
+
+def final_apa_references(papers: list[dict[str, Any]]) -> list[str]:
+    references = []
+    seen: set[str] = set()
+    for paper in papers:
+        if not include_in_final_references(paper):
+            continue
+        reference = format_apa_reference(paper)
+        key = normalize_title(reference)
+        if reference and key not in seen:
+            seen.add(key)
+            references.append(reference)
+    return references
+
+
+REFERENCE_LEAD_KEYS = [
+    "bibliography_entry_if_found",
+    "bibliography_entry",
+    "bibliography_entries_if_found",
+    "bibliography_entries",
+    "reference_entry",
+    "reference",
+    "references",
+    "full_reference",
+    "original_reference",
+    "source_reference",
+    "cited_reference",
+    "citation_reference",
+    "apa_reference",
+    "selected_bibliography_entry",
+    "matched_bibliography_entry",
+    "exact_bibliography_entry",
+]
+
+
+SOURCE_MINED_REFERENCE_FIELDS = {
+    "Thesis": [
+        "introduction_reference_leads",
+        "most_useful_references",
+        "objective_matched_rol_bibliography",
+        "rol_citation_to_bibliography_map",
+        "objective_matched_rol_evidence_extraction_sheet",
+        "objective_matched_rol_extracts",
+        "rol_primary_studies",
+        "primary_study_leads",
+    ],
+    "Research Article": [
+        "research_discussion_reference_leads",
+        "research_discussion_citation_map",
+        "research_discussion_evidence_extraction_sheet",
+    ],
+    "Review Paper": [
+        "review_related_reference_leads",
+        "review_reference_leads",
+        "review_primary_study_leads",
+        "review_section_citation_map",
+        "review_section_evidence_extraction_sheet",
+        "most_useful_references",
+    ],
+}
+
+
+def values_as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def mined_reference_texts(value: Any) -> list[str]:
+    texts: list[str] = []
+    if value is None:
+        return texts
+    if isinstance(value, str):
+        cleaned = re.sub(r"\s+", " ", value).strip(" .;:")
+        return [cleaned] if len(cleaned) >= 8 else []
+    if isinstance(value, list):
+        for item in value:
+            texts.extend(mined_reference_texts(item))
+        return texts
+    if isinstance(value, dict):
+        for key in REFERENCE_LEAD_KEYS:
+            texts.extend(mined_reference_texts(value.get(key)))
+        if texts:
+            return texts
+        citation = str(value.get("citation") or value.get("cited_as") or value.get("author_year") or "").strip()
+        title = str(value.get("title") or value.get("paper_title") or value.get("study_title") or "").strip()
+        year = str(value.get("year") or "").strip()
+        author = str(value.get("author") or value.get("authors") or "").strip()
+        search_query = str(value.get("search_query_to_find_cited_paper") or value.get("search_query") or "").strip()
+        fallback = " ".join(part for part in [citation, author, year, title, search_query] if part)
+        fallback = re.sub(r"\s+", " ", fallback).strip(" .;:")
+        return [fallback] if len(fallback) >= 12 else []
+    return mined_reference_texts(str(value))
+
+
+def looks_like_citable_reference_entry(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(value) < 18:
+        return False
+    if not re.search(r"\b(18|19|20)\d{2}\b", value):
+        return False
+    lower_value = value.lower()
+    if lower_value.startswith(("search ", "query ", "find ", "locate ")):
+        return False
+    if any(marker in lower_value for marker in ["doi", "journal", "vol", "pp.", "pages", "proceedings"]):
+        return True
+    year_match = re.search(r"\b(18|19|20)\d{2}\b", value)
+    before_year = value[: year_match.start()].strip(" .,:;-()") if year_match else ""
+    after_year = value[year_match.end() :].strip(" .,:;-()") if year_match else ""
+    return bool(before_year and len(after_year) >= 8)
+
+
+def citation_key_from_reference_entry(reference_entry: str) -> str:
+    value = re.sub(r"\s+", " ", str(reference_entry or "")).strip()
+    year_match = re.search(r"\b(18|19|20)\d{2}\b", value)
+    year = year_match.group(0) if year_match else "n.d."
+    author_part = value[: year_match.start()].strip(" .,:;-()") if year_match else value[:80]
+    author_part = re.sub(r"^\d+[\).\s]+", "", author_part).strip(" .,:;-()")
+    if not author_part:
+        return f"(Source-mined reference, {year})"
+    et_al = bool(re.search(r"\bet\s+al\b", author_part, flags=re.I))
+    if "," in author_part:
+        first_surname = author_part.split(",", 1)[0].strip()
+    else:
+        first_author = re.split(r"\s+(?:and|&)\s+|;", author_part, maxsplit=1, flags=re.I)[0]
+        words = [word for word in re.split(r"\s+", first_author) if word]
+        first_surname = words[-1] if words else first_author
+    first_surname = re.sub(r"[^A-Za-z'`-]", "", first_surname).strip() or "Source-mined reference"
+    multiple_author_markers = (
+        et_al
+        or bool(re.search(r"\s+(?:and|&)\s+", author_part, flags=re.I))
+        or len(re.findall(r"\b[A-Z][A-Za-z'`-]+,\s*[A-Z]", author_part)) > 1
+    )
+    if multiple_author_markers:
+        return f"({first_surname} et al., {year})"
+    return f"({first_surname}, {year})"
+
+
+def source_mined_reference_leads(papers: list[dict[str, Any]], limit: int = 80) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for paper in papers:
+        note = paper.get("gemini_note") or {}
+        category = paper.get("category") or infer_paper_category(paper)
+        fields = SOURCE_MINED_REFERENCE_FIELDS.get(category, [])
+        for field in fields:
+            for lead in values_as_list(note.get(field)):
+                for text in mined_reference_texts(lead):
+                    if not looks_like_citable_reference_entry(text):
+                        continue
+                    key = normalize_title(text)
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    rows.append(
+                        {
+                            "source_category": category,
+                            "mined_from": field,
+                            "source_citation": citation_key(paper),
+                            "source_title": paper.get("title", ""),
+                            "citation": citation_key_from_reference_entry(text),
+                            "reference_lead": text,
+                            "final_reference_status": (
+                                "Citable source-mined reference from a selected source bibliography/citation map; DOI or link is not required."
+                            ),
+                        }
+                    )
+                    if len(rows) >= limit:
+                        return rows
+    return rows
+
+
+def source_mined_final_references(papers: list[dict[str, Any]], limit: int = 100) -> list[str]:
+    references: list[str] = []
+    seen: set[str] = set()
+    for row in source_mined_reference_leads(papers, limit=limit):
+        reference = re.sub(r"\s+", " ", str(row.get("reference_lead") or "")).strip(" .;")
+        if not reference:
+            continue
+        key = normalize_title(reference)
+        if key in seen:
+            continue
+        seen.add(key)
+        references.append(reference)
+    return references
+
+
+def final_references_with_source_mined(papers: list[dict[str, Any]]) -> list[str]:
+    references: list[str] = []
+    seen: set[str] = set()
+    for reference in [*final_apa_references(papers), *source_mined_final_references(papers)]:
+        key = normalize_title(reference)
+        if reference and key not in seen:
+            seen.add(key)
+            references.append(reference)
+    return references
 
 
 def include_in_final_references(paper: dict[str, Any]) -> bool:
@@ -5052,7 +5457,8 @@ def rol_extracts_for_writing_context(extracts: Any, limit: int = 8) -> list[Any]
 
 def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_section: str = "") -> str:
     rows = []
-    for paper in prioritize_papers_for_reference_context(papers, limit, target_section):
+    context_papers = prioritize_papers_for_reference_context(papers, limit, target_section)
+    for paper in context_papers:
         full_text = paper.get("full_text") or ""
         gemini_note = paper.get("gemini_note") or {}
         category = paper.get("category") or infer_paper_category(paper)
@@ -5138,6 +5544,25 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
                     "selected_style_use": truncate_text(gemini_note.get("selected_style_use") or gemini_note.get("shelton_style_use", ""), 900),
                     "missing_evidence_or_data": gemini_note.get("missing_evidence_or_data", [])[:8],
                 },
+            }
+        )
+    for mined_reference in source_mined_reference_leads(context_papers, limit=24):
+        rows.append(
+            {
+                "citation": mined_reference.get("citation"),
+                "source_id": mined_reference.get("source_citation"),
+                "direct_citation_allowed": True,
+                "planned_evidence_section": paper_evidence_section({}),
+                "target_writing_section": target_section or "",
+                "category": "Source-Mined Original Reference",
+                "source_category": mined_reference.get("source_category"),
+                "mined_from": mined_reference.get("mined_from"),
+                "source_title": mined_reference.get("source_title"),
+                "reference_entry": mined_reference.get("reference_lead"),
+                "citation_policy": (
+                    "Citable because it was extracted from a selected thesis/review/research bibliography or citation map. "
+                    "Do not cite the thesis itself unless directly allowed; cite this original reference entry."
+                ),
             }
         )
     return json.dumps(rows, ensure_ascii=True, indent=2)
@@ -5521,7 +5946,8 @@ def build_discussion_framework(
         "paragraph_framework": [],
         "citation_strategy": [
             "Use original selected primary papers for specific comparisons.",
-            "Use review papers only for broad synthesis unless an original paper has also been selected.",
+            "Use source-mined bibliography/citation-map references as citable original references when a citation key and reference entry are provided.",
+            "Use review papers only for broad synthesis unless an original paper has been selected or source-mined from a selected bibliography/citation map.",
             "Do not cite theses that are marked source-mining only.",
         ],
         "workflow": DISCUSSION_WORKFLOW_TEXT,
@@ -5569,7 +5995,9 @@ workflow: concise reminder of the results-first discussion workflow.
 Rules:
 - Every paragraph framework item must start from a supplied result/finding.
 - Do not invent citations, author names, years, or unsupported mechanisms.
-- Use thesis and review mined leads only as search/interpretation guidance unless the original primary paper is selected.
+- Use thesis and review mined bibliography/citation-map entries as citable original references when they are present
+  in the reference context with a citation key and reference_entry, even when DOI or link is unavailable.
+- Use looser mined leads as search/interpretation guidance when they do not contain a usable author-year reference entry.
 - Evidence-section labels are planning priorities only. A source may support more than one manuscript section when
   its evidence actually fits the claim being written.
 - For Introduction, thesis-mined leads should come from thesis introduction/background/problem statement and bibliography.
@@ -5577,8 +6005,8 @@ Rules:
 - For Discussion thesis RoL mining, give highest value to objective_matched_rol_extracts and
   rol_citation_to_bibliography_map because these connect a similar objective/result to the original cited studies.
 - Use objective_matched_rol_full_block_coverage to understand the whole matched RoL block's argument and citation chain.
-- Do not copy thesis RoL wording or short_exact_rol_excerpt text; use it to choose original studies and shape the
-  comparison logic.
+- Do not copy thesis RoL wording or short_exact_rol_excerpt text; use the extracted original bibliography entries and
+  citation-map references to shape and cite the comparison logic.
 - Make the plan style-led: the rhetorical move should be more than "report finding"; it should frame, validate,
   reconcile, qualify, or extend the finding through related work.
 """
@@ -5646,7 +6074,7 @@ Discussion style examples:
 Preferred comparison vocabulary:
 {style_excerpt(styles, "word_bank", 3500)}
 
-Selected references allowed for citation:
+Selected references and source-mined references allowed for citation:
 {reference_context(selected_papers, target_section="Discussion")}
 
 Discussion framework to follow:
@@ -5654,7 +6082,7 @@ Discussion framework to follow:
 
 Rules:
 - Academic writing style, framing, and validation rhetoric take precedence over plain logical reporting.
-- Interpret the supplied results and compare them with selected references only.
+- Interpret the supplied results and compare them with selected references and citable source-mined references only.
 - Evidence-section labels are planning priorities. If an Introduction-planned source also supports a Discussion
   mechanism, comparison, or implication, it may be used here, but the claim must match the evidence.
 - The paragraph order must follow the Discussion framework where possible: finding -> explanation -> validation or contrast
@@ -5662,10 +6090,10 @@ Rules:
 - Each paragraph must justify the finding by contextualizing it with related work, not merely list previous studies.
 - Prefer Gemini reading notes and downloaded full_text_excerpt evidence where available; use abstracts only when full text was not downloaded/read.
 - Thesis entries marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY are not allowed citations.
-- Use thesis RoL notes only to understand which original primary studies should be searched/selected; cite only
-  original primary papers or review papers that are present as directly citable selected references.
+- Use thesis RoL notes to identify the original primary studies behind the thesis wording. Cite those original studies
+  when the reference context provides them as source-mined reference entries with citation keys; do not cite the thesis itself.
 - When objective_matched_rol_extracts are available, use them to understand which RoL citations match our objective
-  and result direction. Cite only the selected original papers recovered from those citations, not the thesis itself.
+  and result direction. Cite the extracted original bibliography entries, not the thesis itself.
 - Prefer objective_matched_rol_full_block_coverage over isolated exact excerpts because it represents the whole matched
   RoL block's evidence flow.
 - Prefer claim-by-claim extraction sheets over broad summaries:
@@ -5673,16 +6101,16 @@ Rules:
   and review_section_evidence_extraction_sheet show the citation role and evidence context more reliably.
 - Do not copy the thesis author's RoL sentences or short_exact_rol_excerpt text into the Discussion; paraphrase the
   evidence logic in the selected style.
-- Use review-paper synthesis insights to frame the discussion, but do not use a review as the only support for a
-  specific experimental result or method comparison when the original primary paper lead has not been selected/read.
+- Use review-paper synthesis insights to frame the discussion, but for specific experimental results prefer original
+  primary papers that are selected directly or source-mined from selected review/thesis bibliographies.
 - For selected review papers, use review_related_section_full_coverage and review_section_citation_map to understand
-  the most related review section and its citation chain. Cite the review only for broad synthesis; cite selected
-  original papers for specific study evidence. Do not copy review_related_verification_excerpts or review-paper wording.
+  the most related review section and its citation chain. Cite the review only for broad synthesis; cite selected or
+  source-mined original papers for specific study evidence. Do not copy review_related_verification_excerpts or review-paper wording.
 - For selected research articles, use research_discussion_full_coverage to understand how their Discussion explains
   comparable findings, and use research_discussion_citation_map to identify cited original references. Do not copy
   research_discussion_verification_excerpts or the article's Discussion wording.
-- If review bibliography leads are present but the original papers are not selected, mention the need cautiously
-  rather than inventing citations.
+- If a review/thesis bibliography lead is present only as a loose query or title and not as a source-mined reference
+  entry with author-year citation, do not invent a citation from it.
 - Use APA in-text citations exactly like the provided citation strings.
 - Use phrases such as "These findings are in agreement with..." only when a selected reference supports it.
 - Do not invent author names, years, or references.
@@ -5729,7 +6157,7 @@ Introduction style examples:
 Dictionary and transition guidance:
 {style_excerpt(styles, "introduction_dictionary", 4500)}
 
-Selected references allowed for citation:
+Selected references and source-mined references allowed for citation:
 {reference_context(selected_papers, limit=18, target_section="Introduction")}
 
 Rules:
@@ -5743,12 +6171,11 @@ Rules:
   evidence for crop importance, pest status, damage/yield loss, distribution, mechanism framing, or research gap.
 - When using a Discussion-planned source in the Introduction, frame it as background or study justification; keep
   direct comparison with the present Results for the Discussion section.
-- Do not cite theses marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY; cite only directly citable selected
-  primary papers or review papers. If a useful study appears only as a thesis source-mining lead, mention it as a
-  search need, not as a citation.
-- Cite review papers for broad background or synthesis only; cite original selected primary papers for specific
-  results, methods, and study-to-study comparisons.
-- Cite only selected references. Do not invent citations.
+- Do not cite theses marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY; cite the original bibliography entries
+  mined from those theses when they are provided as source-mined reference entries with citation keys.
+- Cite review papers for broad background or synthesis only; cite original selected or source-mined primary papers for
+  specific results, methods, and study-to-study comparisons.
+- Cite only selected references and source-mined reference entries provided in the context. Do not invent citations.
 
 {common}
 """
@@ -5902,7 +6329,8 @@ def generate_full_draft(
     conclusion = write_conclusion(api_key, model, common, styles, results, discussion)
     introduction = write_introduction(api_key, model, common, styles, selected_papers)
     abstract = write_abstract(api_key, model, common, styles, methodology, results, conclusion)
-    references = [format_apa_reference(paper) for paper in selected_papers if include_in_final_references(paper)]
+    source_mined_references = source_mined_reference_leads(selected_papers)
+    references = final_references_with_source_mined(selected_papers)
 
     return {
         "title": title,
@@ -5918,6 +6346,7 @@ def generate_full_draft(
         "discussion_model": (claude_model or DEFAULT_CLAUDE_MODEL) if claude_key else model,
         "conclusion": conclusion,
         "references": references,
+        "source_mined_references": source_mined_references,
         "writing_length_mode": writing_length_mode,
         "target_word_count": target_word_count,
         "section_word_budget": section_word_budget(target_word_count),
