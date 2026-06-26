@@ -1896,6 +1896,9 @@ def generate_search_queries(
 Create search queries for finding research papers to support the manuscript, mainly the Discussion.
 
 Objective: {analysis.get("objective", "")}
+User-provided objective: {analysis.get("user_objective") or analysis.get("objective", "")}
+Focused key findings: {analysis.get("focused_key_findings", "")}
+Discussion focus: {analysis.get("discussion_focus", "")}
 Findings: {analysis.get("major_findings", [])}
 Keywords: {analysis.get("keywords", [])}
 Search intent profile:
@@ -1904,7 +1907,16 @@ Context: {truncate_text(master_context, 3000)}
 Results: {truncate_text(result_text, 5000)}
 
 Return JSON array of {max_queries} short queries.
+Query priority:
+1. The user-provided objective defines the main purpose of the paper search.
+2. Focused key findings define the most important result patterns to search for.
+3. Discussion focus defines which mechanisms, comparisons, and practical implications the papers should help explain.
+4. Uploaded table values provide support terms, but do not make queries for every minor table result when focused
+   key findings are supplied.
 Include crop/host, pest/pathogen, treatment, measured response, weather, location, or system terms when known.
+Create queries that can find papers for treatment efficacy, pest reduction, yield improvement, biological activity,
+mode of action, crop/pest response, dose response, and practical recommendation when those topics match the objective
+or focused key findings.
 Do not create broad methodology queries for experimental design, RBD/CRD/RCBD, ANOVA, or general statistical analysis.
 Only include methodology terms when they are named/specific method-citation needs such as probit analysis, Finney, Abbott correction, Henderson-Tilton correction, LC50/LD50, bioassay protocol, or a named sampling/observation method.
 Every query must contain at least two strong biological anchors such as crop/host, pest/scientific name,
@@ -1970,6 +1982,11 @@ Research analysis:
 Search intent profile for query design:
 {json.dumps(profile, ensure_ascii=True)[:9000]}
 
+User scientific focus:
+- Objective: {analysis.get("user_objective") or analysis.get("objective") or "not supplied"}
+- Focused key findings: {analysis.get("focused_key_findings") or "not supplied"}
+- Discussion focus: {analysis.get("discussion_focus") or "not supplied"}
+
 Methodology, research context, and user notes:
 {truncate_text(context_text, 9000)}
 
@@ -1990,12 +2007,19 @@ but Introduction and Methodology must also receive their own reference-finding l
 
 Rules:
 - Decide what type of paper is needed for each manuscript section before making queries.
+- The user-provided objective and focused key findings are the main drivers for paper-finding queries and Discussion
+  framework support. Do not plan evidence equally for every minor table result when focused key findings are supplied.
+- Use the discussion focus to decide what type of references are needed: treatment efficacy papers, mode-of-action or
+  biological mechanism papers, yield/crop response papers, dose-response papers, practical recommendation papers, or
+  broad synthesis/review papers.
 - For Introduction, find references for crop/pest importance, damage/yield loss, distribution, research gap, and objective framing.
 - For Methodology, do not make broad queries for experimental design, RBD/CRD/RCBD, replications, ANOVA, or general statistical analysis. The methodology is already supplied by the user.
 - For Methodology, make queries only for specific citation/correction needs: named formulas, protocols, bioassay methods, mortality/yield-loss correction methods, probit analysis, LC50/LD50 analysis, or original/foundational method references such as Finney for probit analysis.
 - Methodology references should be original or foundational wherever possible, not generic recent papers that merely used the method.
 - For Methodology, do not request review papers, thesis sources, thesis RoL mining, KrishiKosh, or dissertation sources. Methodology evidence must be original/foundational method literature only.
 - For Discussion, use the drafted Results and Discussion framework as the primary guide: each query must help explain, validate, contrast, or contextualize a finding.
+- For Discussion, give highest priority to queries that directly match the objective and focused key findings.
+  Use uploaded table values only as supporting search terms, not as the sole direction of the query.
 - Section labels are planning priorities, not hard walls. If a Discussion-planned paper also contains strong background
   evidence for crop importance, pest status, damage/yield loss, distribution, or research gap, mark it as useful for
   Introduction citation too.
