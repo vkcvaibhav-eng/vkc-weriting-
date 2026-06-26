@@ -42,6 +42,7 @@ from logic import (
     merge_search_results,
     recommend_writing_style,
     reference_metadata_missing,
+    rerank_papers_after_gemini,
     revise_draft_with_style_audits,
     review_primary_study_search_queries,
     search_and_rank_papers,
@@ -1005,6 +1006,11 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
                 "pdf_status": pdf_availability_status(paper),
                 "rank": index + 1,
                 "score": paper.get("score", 0),
+                "objective_match": paper.get("objective_match", 0),
+                "key_finding_match": paper.get("key_finding_match", 0),
+                "discussion_match": paper.get("discussion_focus_match", 0),
+                "biology_match": paper.get("biology_match", 0),
+                "gemini_evidence": paper.get("gemini_evidence_score", 0),
                 "section": paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", "")),
                 "category": paper.get("category", "Research Article"),
                 "evidence_need": paper.get("evidence_need", ""),
@@ -1031,6 +1037,11 @@ PAPER_TABLE_DISABLED_COLUMNS = [
     "pdf_status",
     "rank",
     "score",
+    "objective_match",
+    "key_finding_match",
+    "discussion_match",
+    "biology_match",
+    "gemini_evidence",
     "section",
     "category",
     "evidence_need",
@@ -1064,6 +1075,12 @@ def paper_selection_editor(papers: list[dict], key: str) -> pd.DataFrame:
                 width="small",
                 help="Downloaded means already extracted; PDF link means a direct PDF clue is available; Open-access clue means full text may be findable during download.",
             ),
+            "score": st.column_config.NumberColumn("Rank score", width="small"),
+            "objective_match": st.column_config.NumberColumn("Objective", width="small"),
+            "key_finding_match": st.column_config.NumberColumn("Key finding", width="small"),
+            "discussion_match": st.column_config.NumberColumn("Disc. focus", width="small"),
+            "biology_match": st.column_config.NumberColumn("Biology", width="small"),
+            "gemini_evidence": st.column_config.NumberColumn("Gemini", width="small"),
         },
         key=key,
     )
@@ -1674,6 +1691,16 @@ with tabs[2]:
     with finding_tab:
         st.markdown("### Reference Finding")
         st.caption("Use the planned queries to search and rank research papers, review papers, and theses.")
+        with st.expander("How references are ranked", expanded=False):
+            st.write(
+                "Ranking now prioritizes objective match, focused key-finding match, discussion-focus match, "
+                "crop/pest/treatment/outcome biology, PDF/readability, citations, year, and source quality. "
+                "Papers that only match statistical design terms such as RBD, CRD, ANOVA, CD, SEm, or DMRT are penalized."
+            )
+            st.write(
+                "After Gemini reads selected sources, the app reranks them again using actual extraction evidence "
+                "from research-paper Discussions, review sections, and thesis RoL blocks."
+            )
         if st.session_state.get("queries"):
             with st.expander("Queries to search", expanded=True):
                 for query in st.session_state.queries:
@@ -1695,6 +1722,7 @@ with tabs[2]:
                         reference_count=st.session_state.reference_count,
                         per_query_limit=st.session_state.per_query_limit,
                         use_ai_scoring=st.session_state.use_ai_scoring,
+                        analysis=analysis,
                     )
                 search_result = annotate_search_result_with_evidence_plan(
                     search_result,
@@ -2093,10 +2121,31 @@ with tabs[3]:
                     st.session_state.paper_search["papers"] = [
                         by_id.get(str(paper.get("paper_id")), paper) for paper in st.session_state.paper_search["papers"]
                     ]
+                reranked_selected = rerank_papers_after_gemini(
+                    st.session_state.selected_papers,
+                    current_context_text(inputs, extracted_files, st.session_state.get("analysis") or {}),
+                    st.session_state.get("analysis") or {},
+                )
+                st.session_state.selected_papers = reranked_selected
+                selected_rank_by_id = {str(item.get("paper_id")): item for item in reranked_selected}
+                if st.session_state.downloaded_references:
+                    st.session_state.downloaded_references = [
+                        selected_rank_by_id.get(str(item.get("paper_id")), item)
+                        for item in st.session_state.downloaded_references
+                    ]
+                if st.session_state.paper_search.get("papers"):
+                    st.session_state.paper_search["papers"] = sorted(
+                        [
+                            selected_rank_by_id.get(str(paper.get("paper_id")), paper)
+                            for paper in st.session_state.paper_search["papers"]
+                        ],
+                        key=lambda paper: paper.get("score", 0),
+                        reverse=True,
+                    )
                 if unread_papers:
                     st.success(
                         f"Gemini read {len(unread_papers)} new source(s); "
-                        f"{already_read_count} already-read source(s) were skipped."
+                        f"{already_read_count} already-read source(s) were skipped. References were reranked from Gemini evidence."
                     )
 
         recommendations = st.session_state.get("gemini_recommendations") or {}
@@ -2150,6 +2199,7 @@ with tabs[3]:
                                 reference_count=st.session_state.reference_count,
                                 per_query_limit=st.session_state.per_query_limit,
                                 use_ai_scoring=st.session_state.use_ai_scoring,
+                                analysis=st.session_state.get("analysis") or {},
                             )
                         extra_search = annotate_search_result_with_evidence_plan(
                             extra_search,
@@ -2239,6 +2289,7 @@ with tabs[3]:
                                 reference_count=st.session_state.reference_count,
                                 per_query_limit=st.session_state.per_query_limit,
                                 use_ai_scoring=st.session_state.use_ai_scoring,
+                                analysis=st.session_state.get("analysis") or {},
                             )
                         extra_search = annotate_search_result_with_evidence_plan(
                             extra_search,
@@ -2310,6 +2361,7 @@ with tabs[3]:
                                 reference_count=st.session_state.reference_count,
                                 per_query_limit=st.session_state.per_query_limit,
                                 use_ai_scoring=st.session_state.use_ai_scoring,
+                                analysis=st.session_state.get("analysis") or {},
                             )
                         extra_search = annotate_search_result_with_evidence_plan(
                             extra_search,
@@ -2404,6 +2456,7 @@ with tabs[3]:
                             reference_count=st.session_state.reference_count,
                             per_query_limit=st.session_state.per_query_limit,
                             use_ai_scoring=st.session_state.use_ai_scoring,
+                            analysis=st.session_state.get("analysis") or {},
                         )
                     extra_search = annotate_search_result_with_evidence_plan(
                         extra_search,

@@ -2935,11 +2935,144 @@ def enrich_selected_reference_metadata(papers: list[dict[str, Any]]) -> list[dic
     return [enrich_reference_metadata_from_crossref(paper) for paper in papers]
 
 
-def heuristic_score_paper(paper: dict[str, Any], context_text: str) -> tuple[float, str]:
-    keywords = set(fallback_keywords(context_text, 40))
-    haystack = f"{paper.get('title', '')} {paper.get('abstract', '')}".lower()
-    overlap = sum(1 for keyword in keywords if keyword in haystack)
-    overlap_score = min(55, overlap * 5)
+RANKING_RESULT_TERMS = {
+    "efficacy",
+    "effective",
+    "bioefficacy",
+    "population",
+    "reduction",
+    "suppression",
+    "mortality",
+    "yield",
+    "damage",
+    "loss",
+    "mode",
+    "action",
+    "mechanism",
+    "toxicity",
+    "resistance",
+    "dose",
+    "response",
+    "management",
+    "recommendation",
+    "control",
+}
+
+
+def ranking_terms(text: str, limit: int = 60) -> list[str]:
+    terms = []
+    seen: set[str] = set()
+    for term in fallback_keywords(text, limit * 2):
+        if term in BAD_QUERY_TERMS or term in {"study", "field", "paper", "result", "results", "research"}:
+            continue
+        if term not in seen:
+            terms.append(term)
+            seen.add(term)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def term_overlap_count(terms: list[str], haystack: str) -> int:
+    return sum(1 for term in terms if term and term.lower() in haystack)
+
+
+def ranking_focus_context(context_text: str, analysis: dict[str, Any] | None = None) -> dict[str, Any]:
+    analysis = analysis or {}
+    objective = str(analysis.get("user_objective") or analysis.get("objective") or "").strip()
+    focused = str(analysis.get("focused_key_findings") or "").strip()
+    discussion_focus = str(analysis.get("discussion_focus") or "").strip()
+    if not focused:
+        focused = " ".join(map(str, analysis.get("major_findings") or []))
+    if not discussion_focus:
+        discussion_focus = " ".join(map(str, analysis.get("discussion_needs") or []))
+    profile = build_search_intent_profile(analysis, context_text, "")
+    anchors = [
+        profile.get("crop_or_host", ""),
+        profile.get("pest_or_problem", ""),
+        profile.get("scientific_name", ""),
+        profile.get("common_name", ""),
+        profile.get("natural_enemy", ""),
+        profile.get("treatment_or_factor", ""),
+        *(profile.get("outcome_terms") or []),
+        *(profile.get("must_include_terms") or []),
+    ]
+    return {
+        "objective_text": objective,
+        "focused_text": focused,
+        "discussion_focus_text": discussion_focus,
+        "objective_terms": ranking_terms(objective, 24),
+        "focused_terms": ranking_terms(focused, 36),
+        "discussion_terms": ranking_terms(discussion_focus, 24),
+        "context_terms": ranking_terms(context_text, 50),
+        "bio_anchors": [str(anchor).strip().lower() for anchor in anchors if str(anchor or "").strip()],
+        "profile": profile,
+    }
+
+
+def paper_rank_haystack(paper: dict[str, Any], include_gemini: bool = False) -> str:
+    parts = [
+        paper.get("title", ""),
+        paper.get("abstract", ""),
+        paper.get("venue", ""),
+        paper.get("journal", ""),
+        paper.get("source", ""),
+        paper.get("query", ""),
+        paper.get("found_query", ""),
+    ]
+    if include_gemini:
+        note = paper.get("gemini_note") or {}
+        parts.extend(
+            [
+                note.get("overall_relevance", ""),
+                note.get("why_relevant", ""),
+                " ".join(map(str, note.get("result_links") or [])),
+                " ".join(map(str, note.get("discussion_points") or [])),
+                " ".join(map(str, note.get("review_synthesis_insights") or [])),
+                " ".join(map(str, note.get("missing_evidence_or_data") or [])),
+                json.dumps(note.get("research_discussion_evidence_extraction_sheet") or [], ensure_ascii=True)[:3000],
+                json.dumps(note.get("objective_matched_rol_evidence_extraction_sheet") or [], ensure_ascii=True)[:3000],
+                json.dumps(note.get("review_section_evidence_extraction_sheet") or [], ensure_ascii=True)[:3000],
+            ]
+        )
+    return " ".join(map(str, parts)).lower()
+
+
+def rank_pdf_score(paper: dict[str, Any]) -> tuple[float, str]:
+    if paper.get("download_success") and int(paper.get("full_text_chars") or 0) >= MIN_USEFUL_PDF_TEXT_CHARS:
+        return 12, "readable PDF"
+    if paper.get("download_success"):
+        return 8, "downloaded low-text PDF"
+    if paper.get("pdf_url") or paper.get("pdf_urls"):
+        return 8, "PDF link"
+    if paper.get("is_open_access"):
+        return 6, "open-access clue"
+    if any(src in str(paper.get("source", "")).lower() for src in ["core", "researchgate", "krishikosh"]):
+        return 4, "repository/source clue"
+    return 0, "no PDF clue"
+
+
+def score_paper_components(
+    paper: dict[str, Any],
+    context_text: str,
+    analysis: dict[str, Any] | None = None,
+    include_gemini: bool = False,
+) -> tuple[float, str, dict[str, Any]]:
+    focus = ranking_focus_context(context_text, analysis)
+    haystack = paper_rank_haystack(paper, include_gemini=include_gemini)
+
+    objective_hits = term_overlap_count(focus["objective_terms"], haystack)
+    finding_hits = term_overlap_count(focus["focused_terms"], haystack)
+    discussion_hits = term_overlap_count(focus["discussion_terms"], haystack)
+    context_hits = term_overlap_count(focus["context_terms"], haystack)
+    anchor_hits = term_overlap_count(focus["bio_anchors"], haystack)
+    result_hits = term_overlap_count(list(RANKING_RESULT_TERMS), haystack)
+
+    objective_score = min(22, objective_hits * 5.5) if focus["objective_terms"] else 0
+    finding_score = min(24, finding_hits * 5.0) if focus["focused_terms"] else 0
+    discussion_score = min(14, discussion_hits * 3.5) if focus["discussion_terms"] else 0
+    biology_score = min(18, (anchor_hits * 4.0) + min(6, result_hits * 1.5))
+    context_score = min(10, context_hits * 1.2)
 
     year = paper.get("year")
     try:
@@ -2958,12 +3091,125 @@ def heuristic_score_paper(paper: dict[str, Any], context_text: str) -> tuple[flo
         year_score = 0
 
     citations = int(paper.get("citation_count") or 0)
-    citation_score = min(20, math.log1p(citations) * 4)
-    source_score = 6 if any(src in str(paper.get("source", "")) for src in ["Semantic Scholar", "CORE", "OpenAlex", "Google Scholar", "Perplexity", "ResearchGate"]) else 3
-    pdf_score = 5 if paper.get("pdf_url") or paper.get("pdf_urls") else 0
-    score = round(min(100, overlap_score + year_score + citation_score + source_score + pdf_score), 1)
-    reason = f"keyword overlap {overlap}; year {year_value or 'unknown'}; citations {citations}; pdf {'yes' if pdf_score else 'unknown'}"
-    return score, reason
+    citation_score = min(10, math.log1p(citations) * 2.5)
+    source_score = 5 if any(src in str(paper.get("source", "")) for src in ["Semantic Scholar", "CORE", "OpenAlex", "Google Scholar", "Perplexity", "ResearchGate"]) else 2
+    pdf_score, pdf_reason = rank_pdf_score(paper)
+    doi_score = 2 if doi_from_paper(paper) else 0
+
+    penalty = 0
+    title_query_text = f"{paper.get('title', '')} {paper.get('query', '')} {paper.get('found_query', '')}".lower()
+    if any(term in title_query_text for term in BAD_QUERY_TERMS) and not any(term in title_query_text for term in SPECIFIC_METHOD_QUERY_TERMS):
+        penalty += 14
+    if any(phrase in title_query_text for phrase in WEAK_QUERY_PHRASES):
+        penalty += 8
+    if not paper.get("abstract") and not (paper.get("pdf_url") or paper.get("pdf_urls") or paper.get("download_success")):
+        penalty += 6
+    if (focus["objective_terms"] or focus["focused_terms"]) and (objective_hits + finding_hits + anchor_hits) == 0:
+        penalty += 10
+
+    gemini_score = 0.0
+    if include_gemini and paper.get("gemini_note"):
+        note = paper.get("gemini_note") or {}
+        extraction_count = sum(
+            len(note.get(key) or [])
+            for key in [
+                "result_links",
+                "discussion_points",
+                "research_discussion_evidence_extraction_sheet",
+                "objective_matched_rol_evidence_extraction_sheet",
+                "review_section_evidence_extraction_sheet",
+                "review_synthesis_insights",
+            ]
+        )
+        gemini_hits = term_overlap_count(
+            [*focus["objective_terms"], *focus["focused_terms"], *focus["discussion_terms"], *focus["bio_anchors"]],
+            haystack,
+        )
+        gemini_score = min(18, extraction_count * 1.8 + gemini_hits * 1.2)
+
+    score = round(
+        max(
+            0,
+            min(
+                100,
+                objective_score
+                + finding_score
+                + discussion_score
+                + biology_score
+                + context_score
+                + year_score
+                + citation_score
+                + source_score
+                + pdf_score
+                + doi_score
+                + gemini_score
+                - penalty,
+            ),
+        ),
+        1,
+    )
+    components = {
+        "objective_match": round(objective_score, 1),
+        "key_finding_match": round(finding_score, 1),
+        "discussion_focus_match": round(discussion_score, 1),
+        "biology_match": round(biology_score, 1),
+        "context_match": round(context_score, 1),
+        "pdf_score": round(pdf_score, 1),
+        "citation_score": round(citation_score, 1),
+        "year_score": round(year_score, 1),
+        "gemini_evidence_score": round(gemini_score, 1),
+        "penalty": round(penalty, 1),
+        "pdf_reason": pdf_reason,
+    }
+    reason = (
+        f"objective {components['objective_match']}; key findings {components['key_finding_match']}; "
+        f"discussion focus {components['discussion_focus_match']}; biology/outcome {components['biology_match']}; "
+        f"PDF {pdf_reason}; citations {citations}; year {year_value or 'unknown'}; "
+        f"Gemini evidence {components['gemini_evidence_score']}; penalty {components['penalty']}"
+    )
+    return score, reason, components
+
+
+def apply_ranking_components(
+    paper: dict[str, Any],
+    score: float,
+    reason: str,
+    components: dict[str, Any],
+    stage: str,
+) -> dict[str, Any]:
+    paper["score"] = score
+    paper["score_reason"] = reason
+    paper["ranking_stage"] = stage
+    paper["ranking_components"] = components
+    for key in ["objective_match", "key_finding_match", "discussion_focus_match", "biology_match", "pdf_score", "gemini_evidence_score", "penalty"]:
+        paper[key] = components.get(key, 0)
+    return paper
+
+
+def heuristic_score_paper(
+    paper: dict[str, Any],
+    context_text: str,
+    analysis: dict[str, Any] | None = None,
+) -> tuple[float, str, dict[str, Any]]:
+    return score_paper_components(paper, context_text, analysis, include_gemini=False)
+
+
+def rerank_papers_after_gemini(
+    papers: list[dict[str, Any]],
+    context_text: str,
+    analysis: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    reranked = []
+    for paper in papers or []:
+        item = dict(paper)
+        score, reason, components = score_paper_components(item, context_text, analysis, include_gemini=True)
+        base_score = float(item.get("score") or 0)
+        if item.get("gemini_note"):
+            score = round(min(100, (base_score * 0.45) + (score * 0.55)), 1)
+            reason = f"Gemini rerank: {reason}"
+        apply_ranking_components(item, score, reason, components, "post_gemini" if item.get("gemini_note") else "pre_gemini")
+        reranked.append(item)
+    return sorted(reranked, key=lambda entry: entry.get("score", 0), reverse=True)
 
 
 def ai_score_papers(
@@ -2971,6 +3217,7 @@ def ai_score_papers(
     model: str,
     papers: list[dict[str, Any]],
     context_text: str,
+    analysis: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not api_key or not papers:
         return papers
@@ -2986,11 +3233,23 @@ def ai_score_papers(
                 "category": paper.get("category") or infer_paper_category(paper),
                 "citation_count": paper.get("citation_count"),
                 "has_pdf_link": bool(paper.get("pdf_url") or paper.get("pdf_urls")),
+                "objective_match": paper.get("objective_match", 0),
+                "key_finding_match": paper.get("key_finding_match", 0),
+                "discussion_focus_match": paper.get("discussion_focus_match", 0),
+                "biology_match": paper.get("biology_match", 0),
+                "pdf_score": paper.get("pdf_score", 0),
+                "score_reason": paper.get("score_reason", ""),
             }
         )
     prompt = f"""
 Sort and classify each paper for usefulness in the Results and Discussion section of this research article.
-Use relevance to the supplied crop/pest/treatment/weather/findings first, then recency and citation strength.
+Use the user-provided objective and focused key findings first, then crop/pest/treatment/outcome match,
+discussion usefulness, PDF/readability, recency, and citation strength.
+
+User scientific focus:
+- Objective: {(analysis or {}).get("user_objective") or (analysis or {}).get("objective") or ""}
+- Focused key findings: {(analysis or {}).get("focused_key_findings") or ""}
+- Discussion focus: {(analysis or {}).get("discussion_focus") or ""}
 
 Research context and findings:
 {truncate_text(context_text, 7000)}
@@ -3000,6 +3259,9 @@ Papers:
 
 Return JSON array. Each item must have paper_id, ai_score from 0 to 100, category as one of
 "Research Article", "Review Paper", or "Thesis", and reason.
+Do not reward papers whose only match is RBD, CRD, ANOVA, CD, SEm, DMRT, replication, or statistical design.
+Reward papers that explain treatment efficacy, pest reduction, yield improvement, dose response, biological activity,
+mode of action, crop/pest response, agreement/disagreement with previous results, or practical recommendation.
 """
     try:
         text = chat_text(
@@ -3222,6 +3484,7 @@ def search_and_rank_papers(
     reference_count: int = MIN_REFERENCE_COUNT,
     per_query_limit: int = 8,
     use_ai_scoring: bool = True,
+    analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     all_papers: list[dict[str, Any]] = []
@@ -3388,14 +3651,13 @@ def search_and_rank_papers(
 
     deduped = deduplicate_papers(all_papers)
     for paper in deduped:
-        score, reason = heuristic_score_paper(paper, context_text)
-        paper["score"] = score
-        paper["score_reason"] = reason
+        score, reason, components = heuristic_score_paper(paper, context_text, analysis)
+        apply_ranking_components(paper, score, reason, components, "pre_download")
         paper["category"] = paper.get("category") or infer_paper_category(paper)
 
     ranked = sorted(deduped, key=lambda item: item.get("score", 0), reverse=True)
     if use_ai_scoring and openai_key:
-        ranked = ai_score_papers(openai_key, model, ranked, context_text)
+        ranked = ai_score_papers(openai_key, model, ranked, context_text, analysis)
         ranked = sorted(ranked, key=lambda item: item.get("score", 0), reverse=True)
 
     selected, quota_status = select_ranked_papers_with_targets(ranked, reference_count)
