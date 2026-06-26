@@ -832,6 +832,19 @@ def section_sort_key(section: str) -> int:
         return len(EVIDENCE_SECTION_ORDER)
 
 
+def pdf_availability_status(paper: dict) -> str:
+    if paper.get("download_success"):
+        return "Downloaded"
+    if paper.get("pdf_url") or paper.get("pdf_urls"):
+        return "PDF link"
+    url = str(paper.get("url") or "").lower().split("?", 1)[0]
+    if url.endswith(".pdf"):
+        return "PDF link"
+    if paper.get("is_open_access"):
+        return "Open-access clue"
+    return "No PDF clue"
+
+
 def paper_rows(papers: list[dict]) -> pd.DataFrame:
     rows = []
     for index, paper in enumerate(papers):
@@ -839,6 +852,7 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
             {
                 "selected": bool(paper.get("selected")),
                 "title": paper.get("title", ""),
+                "pdf_status": pdf_availability_status(paper),
                 "rank": index + 1,
                 "score": paper.get("score", 0),
                 "section": paper.get("evidence_section") or infer_evidence_section_from_text(paper.get("query") or paper.get("title", ""), paper.get("category", "")),
@@ -852,7 +866,6 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
                 "citation": citation_key(paper),
                 "year": paper.get("year"),
                 "citations": paper.get("citation_count", 0),
-                "pdf": "yes" if paper.get("pdf_url") or paper.get("pdf_urls") else "",
                 "full_text_chars": paper.get("full_text_chars", 0),
                 "source": paper.get("source", ""),
                 "reason": paper.get("score_reason", ""),
@@ -865,6 +878,7 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
 
 PAPER_TABLE_DISABLED_COLUMNS = [
     "title",
+    "pdf_status",
     "rank",
     "score",
     "section",
@@ -878,7 +892,6 @@ PAPER_TABLE_DISABLED_COLUMNS = [
     "citation",
     "year",
     "citations",
-    "pdf",
     "full_text_chars",
     "source",
     "reason",
@@ -896,6 +909,11 @@ def paper_selection_editor(papers: list[dict], key: str) -> pd.DataFrame:
         column_config={
             "selected": st.column_config.CheckboxColumn("Use"),
             "title": st.column_config.TextColumn("Title", width="large"),
+            "pdf_status": st.column_config.TextColumn(
+                "PDF available",
+                width="small",
+                help="Downloaded means already extracted; PDF link means a direct PDF clue is available; Open-access clue means full text may be findable during download.",
+            ),
         },
         key=key,
     )
@@ -1578,7 +1596,17 @@ with tabs[2]:
                                     if paper.get("category", "Research Article") == category
                                 ]
                             selected_in_category = len([paper for paper in category_papers if paper.get("selected")])
-                            st.caption(f"{len(category_papers)} found; {selected_in_category} currently selected.")
+                            pdf_clue_count = len(
+                                [
+                                    paper
+                                    for paper in category_papers
+                                    if pdf_availability_status(paper) in {"Downloaded", "PDF link", "Open-access clue"}
+                                ]
+                            )
+                            st.caption(
+                                f"{len(category_papers)} found; {selected_in_category} currently selected; "
+                                f"{pdf_clue_count} with PDF/full-text clue."
+                            )
                             if category_papers:
                                 section_key = normalize_match_text(section).replace(" ", "_") or "section"
                                 st.write(f"Selection purpose: {fallback_evidence_need(section, category)}")
