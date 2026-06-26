@@ -974,26 +974,43 @@ def download_reason(item: dict) -> str:
     return "A PDF/open-access clue existed, but the app could not fetch an open PDF from direct link, ResearchGate, thesis repository, Scholar cluster, CORE, or Unpaywall."
 
 
+DOWNLOAD_STATUS_COLUMNS = [
+    "outcome",
+    "why",
+    "pdf_available",
+    "method",
+    "text_status",
+    "text_engine",
+    "chars",
+    "size_mb",
+    "section",
+    "category",
+    "title",
+    "source",
+    "pdf_path",
+]
+
+
 def download_status_rows(items: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "outcome": download_outcome_label(item),
-                "why": download_reason(item),
-                "pdf_available": pdf_availability_status(item),
-                "method": item.get("download_method", ""),
-                "text_status": item.get("text_status", ""),
-                "text_engine": item.get("text_extraction_method", ""),
-                "chars": item.get("full_text_chars", 0),
-                "size_mb": round((item.get("pdf_size_bytes", 0) or 0) / 1024 / 1024, 2),
-                "section": item.get("evidence_section", ""),
-                "category": item.get("category", ""),
-                "title": item.get("title", ""),
-                "pdf_path": item.get("pdf_path", ""),
-            }
-            for item in items
-        ]
-    )
+    rows = [
+        {
+            "outcome": download_outcome_label(item),
+            "why": download_reason(item),
+            "pdf_available": pdf_availability_status(item),
+            "method": item.get("download_method", ""),
+            "text_status": item.get("text_status", ""),
+            "text_engine": item.get("text_extraction_method", ""),
+            "chars": item.get("full_text_chars", 0),
+            "size_mb": round((item.get("pdf_size_bytes", 0) or 0) / 1024 / 1024, 2),
+            "section": item.get("evidence_section", ""),
+            "category": item.get("category", ""),
+            "title": item.get("title", ""),
+            "source": item.get("source", ""),
+            "pdf_path": item.get("pdf_path", ""),
+        }
+        for item in items
+    ]
+    return pd.DataFrame(rows, columns=DOWNLOAD_STATUS_COLUMNS)
 
 
 def paper_rows(papers: list[dict]) -> pd.DataFrame:
