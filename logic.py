@@ -4852,8 +4852,20 @@ def audit_draft_with_openai_style_editor(
     if not api_key or not draft:
         return fallback
     prompt = f"""
-Audit this research-paper draft as an OpenAI scientific editor. The draft must strictly follow
-the selected author style contract and must not invent unsupported facts or citations.
+Review this research-paper draft as an Academic Style Polisher. The goal is legitimate scholarly
+polishing: make the manuscript read like a coherent, experienced academic writer following the
+selected author style contract. Do not attempt detector evasion. Do not invent unsupported facts or citations.
+
+Check section-wise style behavior:
+- Abstract: compact objective-method-result-conclusion movement.
+- Introduction: crop/problem importance, gap creation, and objective framing.
+- Materials and Methods: procedural clarity without unnecessary rhetoric.
+- Results: table-wise factual reporting without discussion claims.
+- Discussion: claim-by-claim justification using selected evidence, citation roles, and author-style rhetoric.
+- Conclusion: restrained, evidence-based closing.
+
+Also check for generic AI-like academic filler, overbroad claims, unsupported causal language, weak transitions,
+missing citation support, and places where the selected author's style contract is not followed.
 
 Selected author style contract:
 {json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
@@ -4862,14 +4874,14 @@ Draft:
 {truncate_text(draft_plain_text(draft), 30000)}
 
 Return only a JSON object with keys:
-score (0-100), passed (true/false), issues, revision_instructions, summary.
-Issues must identify section and exact style/factual problem.
+score (0-100), passed (true/false), issues, revision_instructions, academic_polish_plan, summary.
+Issues must identify section and exact style, rhetoric, evidence, citation, or factual problem.
 """
     try:
         text = chat_text(
             api_key,
             model,
-            "You are a strict scientific style editor.",
+            "You are a strict academic style polisher and scientific editor.",
             prompt,
             temperature=0.1,
             response_format={"type": "json_object"},
@@ -4893,8 +4905,13 @@ def audit_draft_with_gemini_style_editor(
     if not api_key or not draft:
         return fallback
     prompt = f"""
-Perform the final Gemini editor check on this draft. Check strict selected author style compliance,
-evidence use, citation safety, section order, and whether any claim needs more data.
+Perform the final Academic Style Polisher and evidence check on this draft. The goal is legitimate
+publication-quality scholarly prose in the selected author style, not detector evasion.
+
+Check strict selected author style compliance, evidence use, citation safety, section order, and whether
+any claim needs more data. Also identify generic AI-like filler, repetitive sentence rhythm, unsupported
+causal language, weak claim framing, misplaced Discussion material in Results, and citations that do not
+support the sentence where they appear.
 
 Selected author style contract:
 {json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
@@ -4903,7 +4920,7 @@ Draft:
 {truncate_text(draft_plain_text(draft), 30000)}
 
 Return only a JSON object with keys:
-score (0-100), passed (true/false), issues, revision_instructions, final_editor_note.
+score (0-100), passed (true/false), issues, revision_instructions, academic_polish_plan, final_editor_note.
 """
     try:
         text = gemini_generate_text(api_key, model, prompt, temperature=0.1)
@@ -4928,17 +4945,19 @@ def revise_draft_with_style_audits(
         return draft
     fallback = dict(draft)
     prompt = f"""
-Revise this draft once using the editor audits. Preserve all factual values, tables/figures, and references.
+Revise this draft once using the Academic Style Polisher checks. Preserve all factual values, tables/figures, and references.
 Do not add new citations, authors, years, numbers, treatments, methods, or findings.
-Make the wording stricter to the selected author style contract.
+Make the wording stricter to the selected author style contract and more polished as human academic prose.
+Do not attempt detector evasion. Do not use generic AI filler. Strengthen section-wise rhetoric, transitions,
+claim support, citation placement, and sentence rhythm while preserving the user's data and selected references.
 
 Selected author style contract:
 {json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
 
-OpenAI editor audit:
+OpenAI academic style polish check:
 {json.dumps(openai_audit or {}, ensure_ascii=True)[:12000]}
 
-Gemini editor audit:
+Gemini final academic editor check:
 {json.dumps(gemini_audit or {}, ensure_ascii=True)[:12000]}
 
 Draft:

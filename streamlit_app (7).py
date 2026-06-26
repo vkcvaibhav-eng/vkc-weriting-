@@ -985,9 +985,9 @@ with st.sidebar:
 
 
 st.title("Research Paper Writing App")
-st.caption("Choose an author writing style, search and read evidence, suggest missing support, draft in that style, and run editor audits.")
+st.caption("Choose an author writing style, search and read evidence, draft in that style, then run the Academic Style Polisher and final evidence check.")
 
-tabs = st.tabs(["Inputs", "Writing Style", "Evidence Search", "Gemini Reading", "Draft Preview", "Style Audit", "Export"])
+tabs = st.tabs(["Inputs", "Writing Style", "Evidence Search", "Gemini Reading", "Draft Preview", "Academic Style Polisher", "Export"])
 
 
 with tabs[0]:
@@ -2336,55 +2336,59 @@ with tabs[4]:
 
 
 with tabs[5]:
-    st.subheader("Style Audit and Editor Check")
+    st.subheader("Academic Style Polisher")
+    st.caption(
+        "Flow: Style Polisher -> Evidence/Citation Check -> Final Academic Editor. "
+        "This improves section-wise author style, claim support, citation placement, and scholarly rhythm."
+    )
     draft = st.session_state.get("draft") or {}
     profile = current_style_profile()
 
     if not draft:
-        st.info("Generate a draft before running the style audit.")
+        st.info("Generate a draft before running the Academic Style Polisher.")
     elif not profile:
-        st.warning("Load a writing style report first so the editors can audit against the exact style contract.")
+        st.warning("Load a writing style report first so the polisher can follow the exact style contract.")
     else:
         audit_cols = st.columns(3)
-        audit_cols[0].metric("OpenAI audit", st.session_state.get("openai_style_audit", {}).get("score", "not run"))
-        audit_cols[1].metric("Gemini final check", st.session_state.get("gemini_style_audit", {}).get("score", "not run"))
-        audit_cols[2].metric("Style revision", "applied" if draft.get("style_revision_applied") else "not applied")
+        audit_cols[0].metric("Style Polisher", st.session_state.get("openai_style_audit", {}).get("score", "not run"))
+        audit_cols[1].metric("Evidence check", st.session_state.get("gemini_style_audit", {}).get("score", "not run"))
+        audit_cols[2].metric("Final polish", "applied" if draft.get("style_revision_applied") else "not applied")
 
         left, right = st.columns(2)
         with left:
-            if st.button("Run OpenAI style editor audit", type="primary", width="stretch"):
+            if st.button("Run Academic Style Polisher", type="primary", width="stretch"):
                 if not st.session_state.openai_key:
                     st.error("Enter an OpenAI API key first.")
                 else:
-                    with st.spinner("OpenAI editor is auditing the draft against the selected style report..."):
+                    with st.spinner("Polishing style against the selected author report and section-wise rules..."):
                         st.session_state.openai_style_audit = audit_draft_with_openai_style_editor(
                             st.session_state.openai_key,
                             st.session_state.model,
                             draft,
                             profile,
                         )
-                    st.success("OpenAI style audit complete.")
+                    st.success("Academic Style Polisher check complete.")
         with right:
-            if st.button("Run Gemini final editor check", type="primary", width="stretch"):
+            if st.button("Run Evidence/Citation Check", type="primary", width="stretch"):
                 if not st.session_state.gemini_key:
                     st.error("Enter a Google Gemini API key first.")
                 else:
-                    with st.spinner("Gemini editor is running the final selected-style check..."):
+                    with st.spinner("Gemini is checking evidence use, citation placement, and final author-style fit..."):
                         st.session_state.gemini_style_audit = audit_draft_with_gemini_style_editor(
                             st.session_state.gemini_key,
                             st.session_state.gemini_model,
                             draft,
                             profile,
                         )
-                    st.success("Gemini final editor check complete.")
+                    st.success("Evidence/Citation Check complete.")
 
-        if st.button("Revise draft using style audits", width="stretch"):
+        if st.button("Apply Final Academic Polish", width="stretch"):
             if not st.session_state.openai_key:
                 st.error("Enter an OpenAI API key first.")
             elif not (st.session_state.get("openai_style_audit") or st.session_state.get("gemini_style_audit")):
-                st.warning("Run at least one style audit before revision.")
+                st.warning("Run at least one polishing/check step before revision.")
             else:
-                with st.spinner("Revising the draft while preserving facts, values, and citations..."):
+                with st.spinner("Applying final academic polish while preserving facts, values, and citations..."):
                     st.session_state.draft = revise_draft_with_style_audits(
                         st.session_state.openai_key,
                         st.session_state.model,
@@ -2394,16 +2398,16 @@ with tabs[5]:
                         st.session_state.get("gemini_style_audit"),
                     )
                     st.session_state.docx_bytes = None
-                st.success("Draft revised using the style audits.")
+                st.success("Final academic polish applied.")
 
         openai_audit = st.session_state.get("openai_style_audit") or {}
         if openai_audit:
-            with st.expander("OpenAI editor audit", expanded=True):
+            with st.expander("Academic Style Polisher report", expanded=True):
                 st.write(openai_audit)
 
         gemini_audit = st.session_state.get("gemini_style_audit") or {}
         if gemini_audit:
-            with st.expander("Gemini final editor check", expanded=True):
+            with st.expander("Evidence/Citation Check report", expanded=True):
                 st.write(gemini_audit)
 
 
