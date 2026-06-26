@@ -2117,6 +2117,57 @@ def normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
 
 
+def normalize_title_for_match(title: str) -> str:
+    cleaned = re.sub(r"^\s*[\[(]?\s*pdf\s*[\])]?\s*", "", str(title or ""), flags=re.I)
+    cleaned = re.sub(r"\.{3}|\u2026", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return normalize_title(cleaned)
+
+
+def title_match_score(left_title: str, right_title: str) -> float:
+    left = normalize_title_for_match(left_title)
+    right = normalize_title_for_match(right_title)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    jaccard = len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+    ratio = difflib.SequenceMatcher(None, left, right).ratio()
+    contains = 0.0
+    if min(len(left_tokens), len(right_tokens)) >= 5 and (left in right or right in left):
+        contains = 0.92
+    return round(max(jaccard, ratio, contains), 3)
+
+
+def has_pdf_or_resolver_clue(paper: dict[str, Any]) -> bool:
+    url = str(paper.get("url") or "").lower().split("?", 1)[0]
+    return bool(
+        paper.get("download_success")
+        or paper.get("pdf_url")
+        or paper.get("pdf_urls")
+        or url.endswith(".pdf")
+        or paper.get("is_open_access")
+        or paper.get("pdf_resolver_clue")
+        or doi_from_paper(paper)
+    )
+
+
+def has_direct_pdf_clue(paper: dict[str, Any]) -> bool:
+    url = str(paper.get("url") or "").lower().split("?", 1)[0]
+    return bool(
+        paper.get("download_success")
+        or paper.get("pdf_url")
+        or paper.get("pdf_urls")
+        or url.endswith(".pdf")
+        or paper.get("is_open_access")
+        or paper.get("pdf_resolver_clue")
+    )
+
+
 def infer_paper_category(paper: dict[str, Any] | None = None, title: str = "", source: str = "") -> str:
     paper = paper or {}
     title_text = (title or paper.get("title") or "").lower()
@@ -2789,6 +2840,18 @@ def merge_paper_metadata(primary: dict[str, Any], secondary: dict[str, Any]) -> 
     for url in secondary.get("pdf_urls") or []:
         pdf_urls.add(url)
     merged["pdf_urls"] = list(pdf_urls)
+    if secondary.get("is_open_access"):
+        merged["is_open_access"] = True
+    if secondary.get("pdf_resolver_clue"):
+        merged["pdf_resolver_clue"] = secondary.get("pdf_resolver_clue")
+    if secondary.get("pdf_resolved_from_perplexity"):
+        merged["pdf_resolved_from_perplexity"] = True
+    notes = list(merged.get("pdf_resolution_notes") or [])
+    for note in secondary.get("pdf_resolution_notes") or []:
+        if note and note not in notes:
+            notes.append(note)
+    if notes:
+        merged["pdf_resolution_notes"] = notes
     if merged.get("category") == "Research Article" and secondary.get("category") in {"Review Paper", "Thesis"}:
         merged["category"] = secondary["category"]
     if not merged.get("external_ids"):
@@ -2813,6 +2876,206 @@ def doi_from_paper(paper: dict[str, Any]) -> str:
 def doi_url_from_paper(paper: dict[str, Any]) -> str:
     doi = doi_from_paper(paper)
     return f"https://doi.org/{doi}" if doi else ""
+
+
+def unpaywall_pdf_candidate(doi: str) -> dict[str, Any] | None:
+    doi = clean_doi_value(doi)
+    if not doi:
+        return None
+    try:
+        response = requests.get(
+            f"https://api.unpaywall.org/v2/{doi}",
+            params={"email": "research@example.com"},
+            timeout=20,
+            verify=SSL_VERIFY,
+        )
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        locations = [data.get("best_oa_location") or {}] + (data.get("oa_locations") or [])
+        pdf_url = ""
+        landing_url = ""
+        for location in locations:
+            if not landing_url:
+                landing_url = location.get("url") or ""
+            if location.get("url_for_pdf"):
+                pdf_url = location.get("url_for_pdf")
+                break
+        if not (pdf_url or landing_url or data.get("is_oa")):
+            return None
+        return {
+            "paper_id": f"unpaywall-{doi}",
+            "title": data.get("title") or "",
+            "authors": [],
+            "year": coerce_year(data.get("year")),
+            "abstract": "",
+            "venue": data.get("journal_name") or "",
+            "journal": data.get("journal_name") or "",
+            "volume": "",
+            "issue": "",
+            "pages": "",
+            "publisher": data.get("publisher") or "",
+            "url": landing_url or doi_url_from_paper({"external_ids": {"DOI": doi}}),
+            "citation_count": 0,
+            "source": "Unpaywall",
+            "query": doi,
+            "external_ids": {"DOI": doi},
+            "pdf_url": pdf_url,
+            "is_open_access": bool(data.get("is_oa")),
+            "category": "Research Article",
+        }
+    except Exception:
+        return None
+
+
+def candidate_has_pdf_resolver_value(candidate: dict[str, Any]) -> bool:
+    return bool(
+        has_direct_pdf_clue(candidate)
+        or doi_from_paper(candidate)
+        or candidate.get("url")
+    )
+
+
+def candidate_matches_source_paper(source_paper: dict[str, Any], candidate: dict[str, Any]) -> tuple[bool, float]:
+    source_doi = doi_from_paper(source_paper)
+    candidate_doi = doi_from_paper(candidate)
+    if source_doi and candidate_doi and source_doi.lower() == candidate_doi.lower():
+        return True, 1.0
+    score = title_match_score(source_paper.get("title", ""), candidate.get("title", ""))
+    if score >= 0.72:
+        return True, score
+    return False, score
+
+
+def merge_pdf_resolver_candidate(
+    source_paper: dict[str, Any],
+    candidate: dict[str, Any],
+    engine_label: str,
+    match_score: float,
+) -> dict[str, Any]:
+    merged = merge_paper_metadata(source_paper, candidate)
+    clue = ""
+    if candidate.get("pdf_url") or candidate.get("pdf_urls"):
+        clue = "PDF link"
+    elif candidate.get("is_open_access"):
+        clue = "Open-access metadata"
+    elif doi_from_paper(candidate):
+        clue = "DOI resolver metadata"
+    elif candidate.get("url"):
+        clue = "Source-page resolver metadata"
+    if clue and not merged.get("pdf_resolver_clue"):
+        merged["pdf_resolver_clue"] = clue
+    merged["pdf_resolved_from_perplexity"] = True
+    notes = list(merged.get("pdf_resolution_notes") or [])
+    note = f"{engine_label} matched title/DOI at {match_score:.2f}; clue: {clue or 'metadata'}"
+    if note not in notes:
+        notes.append(note)
+    merged["pdf_resolution_notes"] = notes
+    return merged
+
+
+def resolve_perplexity_pdf_clues(
+    papers: list[dict[str, Any]],
+    semantic_key: str = "",
+    serpapi_key: str = "",
+    core_key: str = "",
+    max_items: int = 35,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    stats = {
+        "attempted": 0,
+        "resolved": 0,
+        "pdf_links": 0,
+        "resolver_clues": 0,
+        "errors": [],
+    }
+    enriched_papers: list[dict[str, Any]] = []
+    attempted = 0
+
+    for paper in papers:
+        item = dict(paper)
+        source_text = str(item.get("source") or "").lower()
+        title = str(item.get("title") or "").strip()
+        if (
+            "perplexity" not in source_text
+            or not title
+            or has_direct_pdf_clue(item)
+            or attempted >= max_items
+        ):
+            enriched_papers.append(item)
+            continue
+
+        attempted += 1
+        stats["attempted"] += 1
+        before_direct = has_direct_pdf_clue(item)
+        exact_query = f'"{title}"'
+        candidates: list[tuple[str, dict[str, Any]]] = []
+
+        doi = doi_from_paper(item)
+        if doi:
+            unpaywall_candidate = unpaywall_pdf_candidate(doi)
+            if unpaywall_candidate:
+                candidates.append(("Unpaywall DOI lookup", unpaywall_candidate))
+
+        engine_calls: list[tuple[str, Any]] = [
+            ("Semantic Scholar title resolver", lambda: search_semantic_scholar(title, semantic_key, limit=3)),
+            ("OpenAlex title resolver", lambda: search_openalex(title, limit=3)),
+        ]
+        if core_key:
+            engine_calls.append(("CORE title resolver", lambda: search_core(title, core_key, limit=3)))
+        if serpapi_key:
+            engine_calls.extend(
+                [
+                    ("Google Scholar title resolver", lambda: search_serpapi_google_scholar(exact_query, serpapi_key, limit=3)),
+                    ("Google PDF title resolver", lambda: search_serpapi_pdf_layer(exact_query, serpapi_key, limit=3)),
+                    (
+                        "ResearchGate title resolver",
+                        lambda: search_researchgate_layer(
+                            exact_query,
+                            serpapi_key,
+                            limit=2,
+                            category_hint=item.get("category") or infer_paper_category(item),
+                        ),
+                    ),
+                ]
+            )
+            if item.get("category") == "Thesis":
+                engine_calls.extend(
+                    [
+                        ("KrishiKosh thesis resolver", lambda: search_krishikosh_layer(exact_query, serpapi_key, limit=3)),
+                        ("Thesis repository resolver", lambda: search_serpapi_thesis_layer(exact_query, serpapi_key, limit=3)),
+                    ]
+                )
+
+        for engine_label, call in engine_calls:
+            try:
+                for candidate in call() or []:
+                    candidates.append((engine_label, candidate))
+            except Exception as exc:
+                if len(stats["errors"]) < 8:
+                    stats["errors"].append(f"{engine_label} failed for '{truncate_text(title, 90)}': {exc}")
+
+        best_matches: list[tuple[float, str, dict[str, Any]]] = []
+        for engine_label, candidate in candidates:
+            if not candidate_has_pdf_resolver_value(candidate):
+                continue
+            matched, score = candidate_matches_source_paper(item, candidate)
+            if matched:
+                best_matches.append((score, engine_label, candidate))
+
+        for match_score, engine_label, candidate in sorted(best_matches, key=lambda row: row[0], reverse=True):
+            item = merge_pdf_resolver_candidate(item, candidate, engine_label, match_score)
+            if item.get("pdf_url") or item.get("pdf_urls"):
+                break
+
+        if not before_direct and has_direct_pdf_clue(item):
+            stats["resolved"] += 1
+            if item.get("pdf_url") or item.get("pdf_urls"):
+                stats["pdf_links"] += 1
+            else:
+                stats["resolver_clues"] += 1
+        enriched_papers.append(item)
+
+    return enriched_papers, stats
 
 
 def normalize_pages(first_page: Any = "", last_page: Any = "", pages: Any = "") -> str:
@@ -3047,6 +3310,10 @@ def rank_pdf_score(paper: dict[str, Any]) -> tuple[float, str]:
         return 8, "PDF link"
     if paper.get("is_open_access"):
         return 6, "open-access clue"
+    if paper.get("pdf_resolver_clue"):
+        return 5, str(paper.get("pdf_resolver_clue"))
+    if doi_from_paper(paper):
+        return 3, "DOI resolver clue"
     if any(src in str(paper.get("source", "")).lower() for src in ["core", "researchgate", "krishikosh"]):
         return 4, "repository/source clue"
     return 0, "no PDF clue"
@@ -3648,6 +3915,22 @@ def search_and_rank_papers(
                 )
             except Exception as exc:
                 warnings.append(f"Deep Perplexity thesis layer failed for '{query}': {exc}")
+
+    all_papers, perplexity_pdf_stats = resolve_perplexity_pdf_clues(
+        all_papers,
+        semantic_key=semantic_key,
+        serpapi_key=serpapi_key,
+        core_key=core_key,
+        max_items=max(12, min(45, int(reference_count or MIN_REFERENCE_COUNT) * 3)),
+    )
+    if perplexity_pdf_stats.get("attempted"):
+        warnings.append(
+            "Perplexity PDF resolver checked "
+            f"{perplexity_pdf_stats.get('attempted')} Perplexity result(s) without PDF clues and added "
+            f"{perplexity_pdf_stats.get('pdf_links')} PDF link(s) plus "
+            f"{perplexity_pdf_stats.get('resolver_clues')} open-access/resolver clue(s)."
+        )
+        warnings.extend(perplexity_pdf_stats.get("errors", [])[:4])
 
     deduped = deduplicate_papers(all_papers)
     for paper in deduped:

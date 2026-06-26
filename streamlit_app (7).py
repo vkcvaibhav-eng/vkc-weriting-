@@ -953,6 +953,11 @@ def pdf_availability_status(paper: dict) -> str:
         return "PDF link"
     if paper.get("is_open_access"):
         return "Open-access clue"
+    if paper.get("pdf_resolver_clue"):
+        return str(paper.get("pdf_resolver_clue"))
+    external_ids = paper.get("external_ids") or {}
+    if external_ids.get("DOI") or paper.get("doi"):
+        return "DOI resolver clue"
     return "No PDF clue"
 
 
