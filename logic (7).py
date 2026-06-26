@@ -5267,7 +5267,7 @@ Check section-wise style behavior:
 - Materials and Methods: procedural clarity without unnecessary rhetoric.
 - Results: table-wise factual reporting without discussion claims.
 - Discussion: claim-by-claim justification using selected evidence, citation roles, and author-style rhetoric.
-- Conclusion: restrained, evidence-based closing.
+- Conclusion: restrained, evidence-based closing without statistical details, significance values, CD, SEm, CV, F-value, or p-value.
 
 Also check for generic AI-like academic filler, overbroad claims, unsupported causal language, weak transitions,
 missing citation support, and places where the selected author's style contract is not followed.
@@ -5316,7 +5316,8 @@ publication-quality scholarly prose in the selected author style, not detector e
 Check strict selected author style compliance, evidence use, citation safety, section order, and whether
 any claim needs more data. Also identify generic AI-like filler, repetitive sentence rhythm, unsupported
 causal language, weak claim framing, misplaced Discussion material in Results, and citations that do not
-support the sentence where they appear.
+support the sentence where they appear. Flag any Conclusion sentence that reports statistical values,
+significance levels, CD, SEm, CV, F-value, p-value, ANOVA/LSD/DMRT details, or table-style result statistics.
 
 Selected author style contract:
 {json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
@@ -5355,6 +5356,9 @@ Do not add new citations, authors, years, numbers, treatments, methods, or findi
 Make the wording stricter to the selected author style contract and more polished as human academic prose.
 Do not attempt detector evasion. Do not use generic AI filler. Strengthen section-wise rhetoric, transitions,
 claim support, citation placement, and sentence rhythm while preserving the user's data and selected references.
+Keep detailed statistical values, significance levels, CD, SEm/SE(m), CV, F-value, p-value, ANOVA/LSD/DMRT details,
+and table-style numerical comparisons in the Results section only. The Conclusion must be concise and interpretive,
+stating only the main biological/experimental inference and practical implication without statistical-detail reporting.
 
 Selected author style contract:
 {json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
@@ -5386,6 +5390,7 @@ References are not rewritten here.
         for key in ["title", "abstract", "introduction", "methodology", "results", "discussion", "conclusion"]:
             if parsed.get(key):
                 revised[key] = parsed[key]
+        revised["conclusion"] = remove_conclusion_statistical_details(revised.get("conclusion", ""))
         revised["style_revision_applied"] = True
         return revised
     except Exception:
@@ -5648,7 +5653,8 @@ def writing_length_directive(mode: str = "Concise style-preserving", target_word
         base = """
 Use a very concise but style-preserving manuscript style.
 - Preserve the selected author's syntax, rhetorical movement, hedging, terminology, and evidence discipline.
-- Preserve all essential methods, result values, statistical meaning, citations, and interpretation logic.
+- Preserve all essential methods, result values, citations, and interpretation logic.
+- Keep detailed statistical meaning and values in Results only; Conclusion should state only the main inference.
 - Remove generic background, repeated phrases, redundant listing, and long transitional padding.
 - Introduction: keep only the strongest background, problem, gap, and objective paragraphs.
 - Materials and Methods: retain reproducible design, treatments, sampling, observations, and statistics, but compress procedural prose.
@@ -5667,7 +5673,8 @@ Use standard full-length manuscript style.
         base = """
 Use a concise, style-preserving manuscript style.
 - Preserve the selected author's style contract, tone, sentence movement, technical vocabulary, hedging, and rhetorical framing.
-- Keep all essential analysis: methods, result values, statistical meaning, discussion logic, citations, and implications.
+- Keep all essential analysis: methods, result values, discussion logic, citations, and implications.
+- Keep detailed statistical meaning and values in Results only; Conclusion should state only the main inference.
 - Make the writing shorter by removing repetition, generic background, excessive transitions, and unnecessary explanation.
 - Prefer dense, polished paragraphs over long descriptive blocks.
 - Results must remain table-wise and SAU/ICAR-compliant, but avoid listing every middle treatment unless it is needed for interpretation.
@@ -5676,6 +5683,72 @@ Use a concise, style-preserving manuscript style.
 """.strip()
     word_directive = target_word_count_directive(target_word_count)
     return f"{base}\n\n{word_directive}".strip() if word_directive else base
+
+
+CONCLUSION_STAT_DETAIL_RE = re.compile(
+    r"("
+    r"CD|C\.D\.|SE\s*\(?m\)?|S\.E\.\s*\(?m\)?|SEm|SE\(m\)|"
+    r"CV|C\.V\.|F[-\s]?value|p[-\s]?value|"
+    r"P\s*[<=>]\s*0?\.\d+|p\s*[<=>]\s*0?\.\d+|"
+    r"ANOVA|LSD|DMRT|DNMRT|critical\s+difference|standard\s+error|"
+    r"coefficient\s+of\s+variation|significance\s+level"
+    r")",
+    flags=re.I,
+)
+
+
+def remove_conclusion_statistical_details(text: str) -> str:
+    """Keep conclusion prose interpretive by removing table-statistic reporting."""
+    cleaned = str(text or "")
+    if not cleaned.strip():
+        return ""
+
+    cleaned = re.sub(r"\bS\.?E\.?\s*\(\s*m\s*\)", "SEm", cleaned, flags=re.I)
+    cleaned = re.sub(
+        r"\([^)]*\)",
+        lambda match: "" if CONCLUSION_STAT_DETAIL_RE.search(match.group(0)) else match.group(0),
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\[[^\]]*\]",
+        lambda match: "" if CONCLUSION_STAT_DETAIL_RE.search(match.group(0)) else match.group(0),
+        cleaned,
+    )
+    cleaned = re.sub(r"\bstatistically\s+at\s+par\s+with\b", "comparable with", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bstatistically\s+at\s+par\b", "comparable", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bsignificantly\s+", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bdiffered\s+significantly\b", "differed", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bsignificant(?:ly)?\b", "", cleaned, flags=re.I)
+
+    sentence_parts = re.split(r"(?<=[.!?])\s+", cleaned)
+    kept_sentences: list[str] = []
+    for sentence in sentence_parts:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        chunks = re.split(r"([;,])", sentence)
+        rebuilt = ""
+        skip_delimiter = False
+        for index, chunk in enumerate(chunks):
+            if index % 2 == 1:
+                if not skip_delimiter and rebuilt.strip():
+                    rebuilt += chunk
+                skip_delimiter = False
+                continue
+            if CONCLUSION_STAT_DETAIL_RE.search(chunk):
+                skip_delimiter = True
+                continue
+            rebuilt += chunk
+        rebuilt = re.sub(CONCLUSION_STAT_DETAIL_RE, "", rebuilt)
+        rebuilt = re.sub(r"\s+([,.;:])", r"\1", rebuilt)
+        rebuilt = re.sub(r"([,;:])\s*([.!?])", r"\2", rebuilt)
+        rebuilt = re.sub(r"\s{2,}", " ", rebuilt).strip(" ,;:")
+        if rebuilt and len(rebuilt.split()) >= 3:
+            kept_sentences.append(rebuilt)
+
+    cleaned = " ".join(kept_sentences).strip()
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned or re.sub(r"\s{2,}", " ", str(text or "")).strip()
 
 
 def write_methodology(
@@ -6203,8 +6276,16 @@ Preferred wording and evaluation phrases:
 Rules:
 - Summarize only the main supported findings.
 - Identify the best treatment, factor, relationship, or practical implication when supplied.
-- Keep it concise and publication-ready.
+- Keep it concise and publication-ready, normally one short paragraph of 2-4 sentences.
 - Do not add new data or new citations.
+- Do not report table-style statistics in the Conclusion.
+- Do not include detailed statistical values, significance levels, CD, SE(m), SEm, CV, F-value, p-value, ANOVA,
+  LSD, DMRT/DNMRT, critical difference, standard error, coefficient of variation, or transformed values.
+- Do not use Results-section phrases such as "statistically at par", "differed significantly", "CD at 5%",
+  or "P < 0.05" in the Conclusion.
+- Use the Results only to identify the main biological or experimental inference; do not repeat statistical details.
+- State the closing inference qualitatively, for example which treatment/factor/system was most promising and what
+  practical or biological implication follows.
 
 {common}
 
@@ -6214,7 +6295,8 @@ Results:
 Discussion:
 {truncate_text(discussion_section, 5000)}
 """
-    return chat_text(api_key, model, "You write concise scientific conclusions.", prompt, temperature=0.25)
+    conclusion = chat_text(api_key, model, "You write concise scientific conclusions without statistical-detail reporting.", prompt, temperature=0.25)
+    return remove_conclusion_statistical_details(conclusion)
 
 
 def write_abstract(
