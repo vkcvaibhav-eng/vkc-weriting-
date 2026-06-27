@@ -68,6 +68,10 @@ MIN_REFERENCE_COUNT = MIN_RESEARCH_ARTICLES + MIN_THESES + MIN_REVIEW_PAPERS
 DEFAULT_PERPLEXITY_MODEL = "sonar-pro"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+SAPLING_AIDETECT_URL = "https://api.sapling.ai/api/v1/aidetect"
+DEFAULT_SAPLING_TARGET_SCORE = 0.10
+SAPLING_SENTENCE_FLAG_SCORE = 0.35
+SAPLING_BLOCK_FLAG_SCORE = 0.25
 DEFAULT_SHELTON_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Anthony M. Shelton.docx")
 DEFAULT_GURR_STYLE_PATH = str(AUTHOR_STYLE_DIR / "Dr. Gurr's Style.docx")
 DISCUSSION_WORKFLOW_TEXT = """Results-first discussion workflow:
@@ -6156,6 +6160,333 @@ def draft_plain_text(draft: dict[str, Any]) -> str:
         ("References", "\n".join(draft.get("references", []))),
     ]
     return "\n\n".join(f"{heading}\n{text}" for heading, text in sections if text)
+
+
+SAPLING_MANUSCRIPT_SECTIONS = [
+    ("abstract", "Abstract"),
+    ("introduction", "Introduction"),
+    ("methodology", "Materials and Methods"),
+    ("results", "Results"),
+    ("discussion", "Discussion"),
+    ("conclusion", "Conclusion"),
+]
+
+
+def draft_quality_sections(draft: dict[str, Any]) -> list[dict[str, str]]:
+    sections = []
+    for key, label in SAPLING_MANUSCRIPT_SECTIONS:
+        text = str(draft.get(key) or "").strip()
+        if text:
+            sections.append({"key": key, "section": label, "text": text})
+    return sections
+
+
+def split_text_blocks(text: str) -> list[str]:
+    blocks = [part.strip() for part in re.split(r"\n\s*\n", str(text or "")) if part.strip()]
+    if blocks:
+        return blocks
+    text = str(text or "").strip()
+    return [text] if text else []
+
+
+def sapling_ai_detect(
+    api_key: str,
+    text: str,
+    sent_scores: bool = True,
+    score_string: bool = False,
+    timeout: int = 60,
+) -> dict[str, Any]:
+    if not api_key:
+        raise ValueError("Sapling API key is required.")
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return {"score": 0.0, "sentence_scores": [], "text": ""}
+    payload = {
+        "key": api_key,
+        "text": clean_text[:190000],
+        "sent_scores": bool(sent_scores),
+        "score_string": bool(score_string),
+    }
+    response = httpx.post(SAPLING_AIDETECT_URL, json=payload, timeout=timeout, verify=SSL_VERIFY)
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("Sapling returned a non-JSON-object response.")
+    data.setdefault("score", 0.0)
+    data.setdefault("sentence_scores", [])
+    data["truncated"] = len(clean_text) > len(payload["text"])
+    return data
+
+
+def _float_score(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def sentence_block_index(sentence: str, blocks: list[str], fallback_index: int = 0) -> int:
+    needle = re.sub(r"\s+", " ", str(sentence or "")).strip()
+    if not needle:
+        return max(0, min(fallback_index, max(0, len(blocks) - 1)))
+    for index, block in enumerate(blocks):
+        haystack = re.sub(r"\s+", " ", block)
+        if needle in haystack:
+            return index
+    return max(0, min(fallback_index, max(0, len(blocks) - 1)))
+
+
+def audit_draft_with_sapling_quality(
+    api_key: str,
+    draft: dict[str, Any],
+    target_score: float = DEFAULT_SAPLING_TARGET_SCORE,
+    sentence_threshold: float = SAPLING_SENTENCE_FLAG_SCORE,
+    block_threshold: float = SAPLING_BLOCK_FLAG_SCORE,
+) -> dict[str, Any]:
+    fallback = {
+        "score": None,
+        "target_score": target_score,
+        "passed": False,
+        "section_scores": [],
+        "flagged_sentences": [],
+        "flagged_blocks": [],
+        "error": "",
+        "summary": "",
+    }
+    if not api_key:
+        fallback["error"] = "Sapling API key is required."
+        fallback["summary"] = "Sapling quality audit was not run because no API key was provided."
+        return fallback
+    sections = draft_quality_sections(draft)
+    if not sections:
+        fallback["error"] = "No manuscript sections found."
+        fallback["summary"] = "Sapling quality audit could not find draft text to check."
+        return fallback
+
+    try:
+        target = max(0.0, min(1.0, float(target_score)))
+    except Exception:
+        target = DEFAULT_SAPLING_TARGET_SCORE
+    sentence_cutoff = max(target, float(sentence_threshold or SAPLING_SENTENCE_FLAG_SCORE))
+    block_cutoff = max(target, float(block_threshold or SAPLING_BLOCK_FLAG_SCORE))
+    combined_text = "\n\n".join(f"{item['section']}\n{item['text']}" for item in sections)
+
+    try:
+        overall_response = sapling_ai_detect(api_key, combined_text, sent_scores=False)
+        overall_score = _float_score(overall_response.get("score"))
+        section_scores: list[dict[str, Any]] = []
+        flagged_sentences: list[dict[str, Any]] = []
+        flagged_blocks: list[dict[str, Any]] = []
+
+        for section_item in sections:
+            section_key = section_item["key"]
+            section_name = section_item["section"]
+            section_text = section_item["text"]
+            blocks = split_text_blocks(section_text)
+            section_response = sapling_ai_detect(api_key, section_text, sent_scores=True)
+            section_score = _float_score(section_response.get("score"))
+            sentence_scores = section_response.get("sentence_scores") or []
+            block_scores: dict[int, list[float]] = {index: [] for index in range(len(blocks))}
+            block_sentence_counts: dict[int, int] = {index: 0 for index in range(len(blocks))}
+
+            for sentence_index, sentence_item in enumerate(sentence_scores):
+                if not isinstance(sentence_item, dict):
+                    continue
+                sentence = str(sentence_item.get("sentence") or "").strip()
+                score = _float_score(sentence_item.get("score"))
+                block_index = sentence_block_index(sentence, blocks, min(sentence_index, max(0, len(blocks) - 1)))
+                block_scores.setdefault(block_index, []).append(score)
+                block_sentence_counts[block_index] = block_sentence_counts.get(block_index, 0) + 1
+                if score >= sentence_cutoff:
+                    flagged_sentences.append(
+                        {
+                            "section_key": section_key,
+                            "section": section_name,
+                            "block_index": block_index,
+                            "sentence_index": sentence_index,
+                            "score": round(score, 4),
+                            "sentence": truncate_text(sentence, 500),
+                        }
+                    )
+
+            for block_index, block_text in enumerate(blocks):
+                scores = block_scores.get(block_index, [])
+                max_score = max(scores) if scores else section_score
+                average_score = sum(scores) / len(scores) if scores else section_score
+                flagged_count = sum(1 for score in scores if score >= sentence_cutoff)
+                if max_score >= sentence_cutoff or average_score >= block_cutoff or (not scores and section_score > target):
+                    flagged_blocks.append(
+                        {
+                            "section_key": section_key,
+                            "section": section_name,
+                            "block_index": block_index,
+                            "score": round(max_score, 4),
+                            "average_score": round(average_score, 4),
+                            "sentence_count": block_sentence_counts.get(block_index, 0),
+                            "flagged_sentence_count": flagged_count,
+                            "text": truncate_text(block_text, 1200),
+                        }
+                    )
+
+            section_scores.append(
+                {
+                    "section_key": section_key,
+                    "section": section_name,
+                    "score": round(section_score, 4),
+                    "sentences": len(sentence_scores),
+                    "flagged_sentences": sum(1 for item in flagged_sentences if item["section_key"] == section_key),
+                    "blocks": len(blocks),
+                    "flagged_blocks": sum(1 for item in flagged_blocks if item["section_key"] == section_key),
+                }
+            )
+
+        return {
+            "score": round(overall_score, 4),
+            "target_score": target,
+            "passed": overall_score <= target,
+            "section_scores": section_scores,
+            "flagged_sentences": flagged_sentences,
+            "flagged_blocks": flagged_blocks,
+            "error": "",
+            "summary": (
+                f"Sapling quality score {overall_score:.3f}; target {target:.3f}. "
+                f"{len(flagged_blocks)} paragraph block(s) and {len(flagged_sentences)} sentence(s) flagged for academic style review."
+            ),
+            "truncated": bool(overall_response.get("truncated")),
+        }
+    except Exception as exc:
+        fallback["target_score"] = target
+        fallback["error"] = str(exc)
+        fallback["summary"] = f"Sapling quality audit error: {exc}"
+        return fallback
+
+
+def revise_draft_with_sapling_quality(
+    api_key: str,
+    model: str,
+    draft: dict[str, Any],
+    style_profile: dict[str, Any],
+    sapling_audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not api_key or not draft:
+        return draft
+    flagged_blocks = list((sapling_audit or {}).get("flagged_blocks") or [])
+    if not flagged_blocks:
+        revised = dict(draft)
+        revised["sapling_revision_applied"] = False
+        revised["sapling_revision_note"] = "No Sapling-flagged paragraph blocks were available for revision."
+        return revised
+
+    block_payload: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in sorted(flagged_blocks, key=lambda row: float(row.get("score") or 0), reverse=True):
+        section_key = str(item.get("section_key") or "").strip()
+        try:
+            block_index = int(item.get("block_index") or 0)
+        except Exception:
+            block_index = 0
+        if not section_key or (section_key, block_index) in seen:
+            continue
+        blocks = split_text_blocks(draft.get(section_key, ""))
+        if block_index < 0 or block_index >= len(blocks):
+            continue
+        seen.add((section_key, block_index))
+        block_payload.append(
+            {
+                "id": f"{section_key}:{block_index}",
+                "section_key": section_key,
+                "section": item.get("section") or section_key,
+                "block_index": block_index,
+                "sapling_score": item.get("score"),
+                "text": blocks[block_index],
+            }
+        )
+        if len(json.dumps(block_payload, ensure_ascii=True)) > 26000:
+            break
+
+    if not block_payload:
+        return draft
+
+    prompt = f"""
+Revise only the paragraph blocks listed below for legitimate academic style quality.
+
+Goals:
+- Make the wording stricter to the selected author style contract and less generic.
+- Preserve every factual value, statistical meaning, treatment name, crop/pest name, citation, author-year citation,
+  method detail, result direction, and section role.
+- Do not add new citations, authors, years, data, mechanisms, treatments, or claims.
+- Do not rewrite References.
+- Do not attempt detector evasion. Treat Sapling as a quality signal for generic or formulaic prose only.
+- Keep Results factual and Discussion interpretive. Keep detailed statistical values in Results only.
+- For Conclusion, keep only concise biological/experimental inference and practical implication.
+
+Selected author style contract:
+{json.dumps(compact_style_profile_for_api(style_profile, "editing"), ensure_ascii=True)[:12000]}
+
+Sapling quality audit summary:
+{json.dumps(sapling_audit or {}, ensure_ascii=True)[:9000]}
+
+Blocks to revise:
+{json.dumps(block_payload, ensure_ascii=True)[:28000]}
+
+Return only a JSON object with key "rewrites".
+Each rewrite must contain: id, section_key, block_index, revised_text.
+If a block is already acceptable, return the original text as revised_text.
+"""
+    fallback = dict(draft)
+    try:
+        text = chat_text(
+            api_key,
+            model,
+            "You are a scientific manuscript editor revising flagged paragraphs for precise academic style.",
+            prompt,
+            temperature=0.15,
+            response_format={"type": "json_object"},
+        )
+        parsed = parse_json_object(text, {})
+        rewrites = parsed.get("rewrites") or []
+        rewrite_map: dict[tuple[str, int], str] = {}
+        for item in rewrites:
+            if not isinstance(item, dict):
+                continue
+            section_key = str(item.get("section_key") or "").strip()
+            try:
+                block_index = int(item.get("block_index") or 0)
+            except Exception:
+                continue
+            revised_text = str(item.get("revised_text") or "").strip()
+            if section_key and revised_text:
+                rewrite_map[(section_key, block_index)] = revised_text
+
+        revised = dict(draft)
+        for section_key, _section_name in SAPLING_MANUSCRIPT_SECTIONS:
+            blocks = split_text_blocks(revised.get(section_key, ""))
+            changed = False
+            for index, block in enumerate(blocks):
+                replacement = rewrite_map.get((section_key, index))
+                if replacement:
+                    blocks[index] = replacement
+                    changed = True
+            if changed:
+                section_text = "\n\n".join(blocks)
+                if section_key == "conclusion":
+                    section_text = remove_conclusion_statistical_details(section_text)
+                else:
+                    section_text = sanitize_generated_section_text(section_text)
+                if section_key in {"introduction", "discussion"}:
+                    section_text = split_long_section_into_paragraphs(section_text, max_words=240)
+                revised[section_key] = section_text
+
+        revised["conclusion"] = remove_conclusion_statistical_details(
+            sanitize_generated_section_text(revised.get("conclusion", ""))
+        )
+        revised["sapling_revision_applied"] = True
+        revised["sapling_rewritten_blocks"] = len(rewrite_map)
+        revised["sapling_revision_note"] = "Sapling-guided academic revision applied once to flagged paragraph blocks."
+        return revised
+    except Exception as exc:
+        fallback["sapling_revision_error"] = str(exc)
+        return fallback
 
 
 def audit_draft_with_openai_style_editor(

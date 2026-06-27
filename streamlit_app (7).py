@@ -15,11 +15,13 @@ from logic import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_PERPLEXITY_MODEL,
+    DEFAULT_SAPLING_TARGET_SCORE,
     DEFAULT_SHELTON_STYLE_PATH,
     MIN_REFERENCE_COUNT,
     STYLE_PRESETS,
     audit_draft_with_gemini_style_editor,
     audit_draft_with_openai_style_editor,
+    audit_draft_with_sapling_quality,
     analyze_research_context,
     build_discussion_framework,
     build_docx,
@@ -44,6 +46,7 @@ from logic import (
     recommend_writing_style,
     reference_metadata_missing,
     rerank_papers_after_gemini,
+    revise_draft_with_sapling_quality,
     revise_draft_with_style_audits,
     review_primary_study_search_queries,
     search_and_rank_papers,
@@ -122,6 +125,13 @@ API_SECRET_NAMES = {
         "claude.key",
         "claude.api_key",
     ),
+    "sapling_key": (
+        "SAPLING_API_KEY",
+        "SAPLING_KEY",
+        "sapling_api_key",
+        "sapling.key",
+        "sapling.api_key",
+    ),
 }
 
 API_SECRETS_TEMPLATE = """OPENAI_API_KEY = "your-openai-key"
@@ -131,6 +141,7 @@ CORE_API_KEY = "your-core-key"
 PERPLEXITY_API_KEY = "your-perplexity-key"
 GEMINI_API_KEY = "your-gemini-key"
 ANTHROPIC_API_KEY = "your-claude-key"
+SAPLING_API_KEY = "your-sapling-key"
 """
 
 
@@ -192,6 +203,10 @@ def init_state() -> None:
         "gemini_model": DEFAULT_GEMINI_MODEL,
         "claude_key": "",
         "claude_model": DEFAULT_CLAUDE_MODEL,
+        "sapling_key": "",
+        "sapling_audit": {},
+        "sapling_target_score": DEFAULT_SAPLING_TARGET_SCORE,
+        "sapling_export_confirmed": False,
         "model": "gpt-4o-mini",
         "manual_api_key_override": False,
         "reference_count": MIN_REFERENCE_COUNT,
@@ -1158,6 +1173,19 @@ with st.sidebar:
     st.caption("Claude is used for the Discussion framework and Discussion section when this key is available.")
 
     st.divider()
+    st.subheader("Quality Audit")
+    configure_api_key("Sapling API key", "sapling_key")
+    st.session_state.sapling_target_score = st.number_input(
+        "Sapling target score",
+        min_value=0.0,
+        max_value=1.0,
+        value=float(st.session_state.get("sapling_target_score", DEFAULT_SAPLING_TARGET_SCORE)),
+        step=0.01,
+        format="%.2f",
+        help="Soft readiness target only. Sapling is used as a quality signal for generic prose, not as proof of authorship.",
+    )
+
+    st.divider()
     st.subheader("Writing Length")
     word_budget = section_word_budget(
         st.session_state.get("target_word_count", 2000),
@@ -1346,6 +1374,8 @@ with tabs[0]:
                 st.session_state.extracted_files = extracted_files_to_dict(extracted)
                 st.session_state.docx_bytes = None
                 st.session_state.draft = {}
+                st.session_state.sapling_audit = {}
+                st.session_state.sapling_export_confirmed = False
                 if errors:
                     st.error("\n".join(errors))
                 st.success(f"Extracted {len(extracted)} file(s).")
@@ -1457,6 +1487,8 @@ with tabs[1]:
             st.session_state.active_style_report = contract.get("profile") or {}
             st.session_state.openai_style_audit = {}
             st.session_state.gemini_style_audit = {}
+            st.session_state.sapling_audit = {}
+            st.session_state.sapling_export_confirmed = False
             st.session_state.docx_bytes = None
             st.success(f"Loaded {contract.get('characters', 0)} characters from {contract.get('author')}.")
         except Exception as exc:
@@ -1495,6 +1527,8 @@ with tabs[1]:
                     st.session_state.active_style_report = st.session_state.active_style_contract.get("profile") or {}
                     st.session_state.openai_style_audit = {}
                     st.session_state.gemini_style_audit = {}
+                    st.session_state.sapling_audit = {}
+                    st.session_state.sapling_export_confirmed = False
                     st.session_state.docx_bytes = None
                 except Exception as exc:
                     st.warning(f"Suggested style could not be loaded automatically: {exc}")
@@ -2734,6 +2768,10 @@ with tabs[4]:
                         paper_length_label=st.session_state.paper_length_option,
                     )
                     st.session_state.draft = draft
+                    st.session_state.openai_style_audit = {}
+                    st.session_state.gemini_style_audit = {}
+                    st.session_state.sapling_audit = {}
+                    st.session_state.sapling_export_confirmed = False
                     st.session_state.docx_bytes = None
                     st.success("Draft generated.")
                 except Exception as exc:
@@ -2840,12 +2878,16 @@ with tabs[5]:
     elif not profile:
         st.warning("Load a writing style report first so the polisher can follow the exact style contract.")
     else:
-        audit_cols = st.columns(3)
+        sapling_audit = st.session_state.get("sapling_audit") or {}
+        sapling_score = sapling_audit.get("score")
+        sapling_display = "not run" if sapling_score is None else f"{float(sapling_score):.3f}"
+        audit_cols = st.columns(4)
         audit_cols[0].metric("Style Polisher", st.session_state.get("openai_style_audit", {}).get("score", "not run"))
         audit_cols[1].metric("Evidence check", st.session_state.get("gemini_style_audit", {}).get("score", "not run"))
-        audit_cols[2].metric("Final polish", "applied" if draft.get("style_revision_applied") else "not applied")
+        audit_cols[2].metric("Sapling quality", sapling_display, f"target {float(st.session_state.sapling_target_score):.2f}")
+        audit_cols[3].metric("Final polish", "applied" if draft.get("style_revision_applied") else "not applied")
 
-        left, right = st.columns(2)
+        left, middle, right = st.columns(3)
         with left:
             if st.button("Run Academic Style Polisher", type="primary", width="stretch"):
                 if not st.session_state.openai_key:
@@ -2859,7 +2901,7 @@ with tabs[5]:
                             profile,
                         )
                     st.success("Academic Style Polisher check complete.")
-        with right:
+        with middle:
             if st.button("Run Evidence/Citation Check", type="primary", width="stretch"):
                 if not st.session_state.gemini_key:
                     st.error("Enter a Google Gemini API key first.")
@@ -2872,24 +2914,71 @@ with tabs[5]:
                             profile,
                         )
                     st.success("Evidence/Citation Check complete.")
+        with right:
+            if st.button("Run Sapling Quality Audit", type="primary", width="stretch"):
+                if not st.session_state.sapling_key:
+                    st.error("Enter a Sapling API key first.")
+                else:
+                    with st.spinner("Sapling is checking generic-prose risk and section-level academic style readiness..."):
+                        st.session_state.sapling_audit = audit_draft_with_sapling_quality(
+                            st.session_state.sapling_key,
+                            draft,
+                            target_score=st.session_state.sapling_target_score,
+                        )
+                        st.session_state.sapling_export_confirmed = False
+                    if st.session_state.sapling_audit.get("error"):
+                        st.error(st.session_state.sapling_audit["summary"])
+                    else:
+                        st.success("Sapling quality audit complete.")
 
-        if st.button("Apply Final Academic Polish", width="stretch"):
-            if not st.session_state.openai_key:
-                st.error("Enter an OpenAI API key first.")
-            elif not (st.session_state.get("openai_style_audit") or st.session_state.get("gemini_style_audit")):
-                st.warning("Run at least one polishing/check step before revision.")
-            else:
-                with st.spinner("Applying final academic polish while preserving facts, values, and citations..."):
-                    st.session_state.draft = revise_draft_with_style_audits(
-                        st.session_state.openai_key,
-                        st.session_state.model,
-                        draft,
-                        profile,
-                        st.session_state.get("openai_style_audit"),
-                        st.session_state.get("gemini_style_audit"),
-                    )
-                    st.session_state.docx_bytes = None
-                st.success("Final academic polish applied.")
+        polish_left, polish_right = st.columns(2)
+        with polish_left:
+            if st.button("Apply Final Academic Polish", width="stretch"):
+                if not st.session_state.openai_key:
+                    st.error("Enter an OpenAI API key first.")
+                elif not (st.session_state.get("openai_style_audit") or st.session_state.get("gemini_style_audit")):
+                    st.warning("Run at least one polishing/check step before revision.")
+                else:
+                    with st.spinner("Applying final academic polish while preserving facts, values, and citations..."):
+                        st.session_state.draft = revise_draft_with_style_audits(
+                            st.session_state.openai_key,
+                            st.session_state.model,
+                            draft,
+                            profile,
+                            st.session_state.get("openai_style_audit"),
+                            st.session_state.get("gemini_style_audit"),
+                        )
+                        st.session_state.sapling_audit = {}
+                        st.session_state.sapling_export_confirmed = False
+                        st.session_state.docx_bytes = None
+                    st.success("Final academic polish applied. Run Sapling Quality Audit again for a fresh readiness score.")
+        with polish_right:
+            if st.button("Apply Sapling-Guided Academic Revision", width="stretch"):
+                if not st.session_state.openai_key:
+                    st.error("Enter an OpenAI API key first.")
+                elif not st.session_state.get("sapling_audit"):
+                    st.warning("Run Sapling Quality Audit before Sapling-guided revision.")
+                elif not (st.session_state.sapling_audit.get("flagged_blocks") or []):
+                    st.info("Sapling did not return paragraph blocks that need revision.")
+                else:
+                    with st.spinner("Revising Sapling-flagged paragraph blocks in the selected author style..."):
+                        revised_draft = revise_draft_with_sapling_quality(
+                            st.session_state.openai_key,
+                            st.session_state.model,
+                            draft,
+                            profile,
+                            st.session_state.get("sapling_audit"),
+                        )
+                        st.session_state.draft = revised_draft
+                        if st.session_state.sapling_key:
+                            st.session_state.sapling_audit = audit_draft_with_sapling_quality(
+                                st.session_state.sapling_key,
+                                revised_draft,
+                                target_score=st.session_state.sapling_target_score,
+                            )
+                        st.session_state.sapling_export_confirmed = False
+                        st.session_state.docx_bytes = None
+                    st.success("Sapling-guided academic revision applied and re-audited once.")
 
         openai_audit = st.session_state.get("openai_style_audit") or {}
         if openai_audit:
@@ -2900,6 +2989,28 @@ with tabs[5]:
         if gemini_audit:
             with st.expander("Evidence/Citation Check report", expanded=True):
                 st.write(gemini_audit)
+
+        sapling_audit = st.session_state.get("sapling_audit") or {}
+        if sapling_audit:
+            with st.expander("Sapling Quality Audit report", expanded=True):
+                if sapling_audit.get("error"):
+                    st.error(sapling_audit.get("summary") or sapling_audit.get("error"))
+                else:
+                    sap_cols = st.columns(4)
+                    sap_cols[0].metric("Score", f"{float(sapling_audit.get('score') or 0):.3f}")
+                    sap_cols[1].metric("Target", f"{float(sapling_audit.get('target_score') or 0):.3f}")
+                    sap_cols[2].metric("Flagged blocks", len(sapling_audit.get("flagged_blocks") or []))
+                    sap_cols[3].metric("Flagged sentences", len(sapling_audit.get("flagged_sentences") or []))
+                    st.write(sapling_audit.get("summary", ""))
+                    if sapling_audit.get("section_scores"):
+                        st.markdown("**Section scores**")
+                        st.dataframe(pd.DataFrame(sapling_audit["section_scores"]), width="stretch", hide_index=True)
+                    if sapling_audit.get("flagged_blocks"):
+                        st.markdown("**Flagged paragraph blocks**")
+                        st.dataframe(pd.DataFrame(sapling_audit["flagged_blocks"]), width="stretch", hide_index=True)
+                    if sapling_audit.get("flagged_sentences"):
+                        st.markdown("**Flagged sentences**")
+                        st.dataframe(pd.DataFrame(sapling_audit["flagged_sentences"]), width="stretch", hide_index=True)
 
 
 with tabs[6]:
@@ -2912,13 +3023,39 @@ with tabs[6]:
             "DOCX file name",
             value=(draft.get("title") or "research_paper").replace(" ", "_")[:80] + ".docx",
         )
+        sapling_audit = st.session_state.get("sapling_audit") or {}
+        sapling_score = sapling_audit.get("score")
+        sapling_target = float(st.session_state.get("sapling_target_score", DEFAULT_SAPLING_TARGET_SCORE))
+        sapling_requires_confirmation = False
+        if not sapling_audit:
+            st.info("Sapling quality audit has not been run. Export is allowed, but run the audit first if you want the readiness score.")
+        elif sapling_audit.get("error"):
+            st.warning(f"Sapling quality audit did not complete: {sapling_audit.get('summary') or sapling_audit.get('error')}")
+        elif sapling_score is None:
+            st.warning("Sapling quality audit did not return an overall score. Export is allowed, but rerun the audit if you need a readiness score.")
+        elif sapling_score is not None and float(sapling_score) > sapling_target:
+            sapling_requires_confirmation = True
+            st.warning(
+                f"Sapling quality score is {float(sapling_score):.3f}, above the target {sapling_target:.3f}. "
+                "You can export after confirming, or return to Academic Style Polisher for Sapling-guided revision."
+            )
+            st.checkbox(
+                "I reviewed the Sapling report and want to build the DOCX anyway.",
+                key="sapling_export_confirmed",
+            )
+        else:
+            st.success(f"Sapling quality score is within target ({float(sapling_score):.3f} <= {sapling_target:.3f}).")
+
         if st.button("Build DOCX", type="primary", width="stretch"):
-            try:
-                with st.spinner("Building Word document..."):
-                    st.session_state.docx_bytes = build_docx(draft)
-                st.success("DOCX is ready.")
-            except Exception as exc:
-                st.error(str(exc))
+            if sapling_requires_confirmation and not st.session_state.get("sapling_export_confirmed"):
+                st.error("Confirm the Sapling soft-gate checkbox before building the DOCX, or revise and rerun the audit.")
+            else:
+                try:
+                    with st.spinner("Building Word document..."):
+                        st.session_state.docx_bytes = build_docx(draft)
+                    st.success("DOCX is ready.")
+                except Exception as exc:
+                    st.error(str(exc))
 
         if st.session_state.docx_bytes:
             st.download_button(
