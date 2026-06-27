@@ -12,7 +12,6 @@ importlib.reload(logic_module)
 
 from logic import (
     DISCUSSION_WORKFLOW_TEXT,
-    DEFAULT_CLAUDE_MODEL,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_PERPLEXITY_MODEL,
     DEFAULT_SAPLING_TARGET_SCORE,
@@ -36,7 +35,7 @@ from logic import (
     format_apa_reference,
     gemini_read_selected_papers,
     generate_full_draft,
-    generate_claude_discussion_search_plan,
+    generate_openai_discussion_search_plan,
     generate_search_queries,
     include_in_final_references,
     load_sau_icar_results_prompt,
@@ -113,18 +112,6 @@ API_SECRET_NAMES = {
         "gemini.key",
         "gemini.api_key",
     ),
-    "claude_key": (
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_API_KEY",
-        "ANTHROPIC_KEY",
-        "CLAUDE_KEY",
-        "anthropic_api_key",
-        "claude_api_key",
-        "anthropic.key",
-        "anthropic.api_key",
-        "claude.key",
-        "claude.api_key",
-    ),
     "sapling_key": (
         "SAPLING_API_KEY",
         "SAPLING_KEY",
@@ -140,7 +127,6 @@ SEMANTIC_SCHOLAR_API_KEY = "your-semantic-scholar-key"
 CORE_API_KEY = "your-core-key"
 PERPLEXITY_API_KEY = "your-perplexity-key"
 GEMINI_API_KEY = "your-gemini-key"
-ANTHROPIC_API_KEY = "your-claude-key"
 SAPLING_API_KEY = "your-sapling-key"
 """
 
@@ -201,8 +187,6 @@ def init_state() -> None:
         "perplexity_model": DEFAULT_PERPLEXITY_MODEL,
         "gemini_key": "",
         "gemini_model": DEFAULT_GEMINI_MODEL,
-        "claude_key": "",
-        "claude_model": DEFAULT_CLAUDE_MODEL,
         "sapling_key": "",
         "sapling_audit": {},
         "sapling_target_score": DEFAULT_SAPLING_TARGET_SCORE,
@@ -465,8 +449,6 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         analysis,
         [],
         results_section or result_text,
-        claude_key=st.session_state.claude_key,
-        claude_model=st.session_state.claude_model,
     )
     analysis["discussion_framework"] = discussion_framework
     analysis = analysis_with_current_style(analysis)
@@ -479,9 +461,9 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         result_text,
         max_queries=6,
     )
-    claude_plan = generate_claude_discussion_search_plan(
-        st.session_state.claude_key,
-        st.session_state.claude_model,
+    openai_plan = generate_openai_discussion_search_plan(
+        st.session_state.openai_key,
+        st.session_state.model,
         analysis,
         context_text,
         result_text,
@@ -490,19 +472,19 @@ def build_context_for_search(inputs: dict, files) -> tuple[dict, str, list[str]]
         discussion_framework=discussion_framework,
         max_queries=8,
     )
-    claude_queries = collect_plan_queries(claude_plan)
+    openai_queries = collect_plan_queries(openai_plan)
     if (
-        claude_plan.get("needed_paper_types")
-        or claude_plan.get("section_evidence_plan")
-        or claude_queries
-        or claude_plan.get("claude_query_error")
+        openai_plan.get("needed_paper_types")
+        or openai_plan.get("section_evidence_plan")
+        or openai_queries
+        or openai_plan.get("query_error")
     ):
-        analysis["claude_discussion_search_plan"] = claude_plan
+        analysis["discussion_search_plan"] = openai_plan
         analysis["section_evidence_plan"] = section_plan_items_from_analysis(analysis)
 
     queries = []
     seen_queries = set()
-    for query_group in (base_queries, claude_queries):
+    for query_group in (base_queries, openai_queries):
         for query in query_group:
             clean_query = clean_query_text(query)
             normalized_query = " ".join(clean_query.lower().split())
@@ -749,7 +731,7 @@ def fallback_writing_use(section: str, category: str) -> str:
     return f"Use as direct support in the {section} when the paper closely matches the claim."
 
 
-def collect_plan_queries(claude_plan: dict) -> list[str]:
+def collect_plan_queries(search_plan: dict) -> list[str]:
     queries = []
     for key in [
         "introduction_search_queries",
@@ -758,13 +740,13 @@ def collect_plan_queries(claude_plan: dict) -> list[str]:
         "review_mining_queries",
         "thesis_mining_queries",
     ]:
-        for query in claude_plan.get(key) or []:
+        for query in search_plan.get(key) or []:
             clean_query = clean_query_text(query)
             if key == "methodology_search_queries" and not keep_methodology_query(clean_query):
                 continue
             if clean_query:
                 queries.append(clean_query)
-    for item in claude_plan.get("section_evidence_plan") or []:
+    for item in search_plan.get("section_evidence_plan") or []:
         if isinstance(item, dict):
             clean_query = clean_query_text(item.get("query") or item.get("search_query"))
             section = normalize_evidence_section(item.get("section"))
@@ -780,8 +762,8 @@ def collect_plan_queries(claude_plan: dict) -> list[str]:
 
 def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] | None = None) -> list[dict]:
     analysis = analysis or {}
-    claude_plan = analysis.get("claude_discussion_search_plan") or {}
-    raw_items = analysis.get("section_evidence_plan") or claude_plan.get("section_evidence_plan") or []
+    search_plan = analysis.get("discussion_search_plan") or {}
+    raw_items = analysis.get("section_evidence_plan") or search_plan.get("section_evidence_plan") or []
     items = []
     for item in raw_items:
         if not isinstance(item, dict):
@@ -816,11 +798,11 @@ def section_plan_items_from_analysis(analysis: dict | None, queries: list[str] |
         return items
 
     grouped_queries = [
-        ("Introduction", "Research Article", claude_plan.get("introduction_search_queries") or []),
-        ("Methodology", "Research Article", claude_plan.get("methodology_search_queries") or []),
-        ("Discussion", "Research Article", claude_plan.get("discussion_search_queries") or []),
-        ("Discussion", "Review Paper", claude_plan.get("review_mining_queries") or []),
-        ("Discussion", "Thesis", claude_plan.get("thesis_mining_queries") or []),
+        ("Introduction", "Research Article", search_plan.get("introduction_search_queries") or []),
+        ("Methodology", "Research Article", search_plan.get("methodology_search_queries") or []),
+        ("Discussion", "Research Article", search_plan.get("discussion_search_queries") or []),
+        ("Discussion", "Review Paper", search_plan.get("review_mining_queries") or []),
+        ("Discussion", "Thesis", search_plan.get("thesis_mining_queries") or []),
     ]
     for section, source_type, query_group in grouped_queries:
         for query in query_group:
@@ -1167,10 +1149,8 @@ with st.sidebar:
     st.session_state.gemini_model = st.text_input("Gemini model", value=st.session_state.gemini_model)
 
     st.divider()
-    st.subheader("Premium Discussion")
-    configure_api_key("Claude / Anthropic API key", "claude_key")
-    st.session_state.claude_model = st.text_input("Claude discussion model", value=st.session_state.claude_model)
-    st.caption("Claude is used for the Discussion framework and Discussion section when this key is available.")
+    st.subheader("Discussion Engine")
+    st.caption("OpenAI is used for the Discussion framework, evidence-query planning, and Discussion writing.")
 
     st.divider()
     st.subheader("Quality Audit")
@@ -1631,7 +1611,7 @@ with tabs[2]:
                 st.warning("Add methodology, master context, or result files before analyzing.")
             else:
                 with st.spinner(
-                    "Analyzing findings, writing Results, building the Discussion framework, and asking Claude to plan the evidence search..."
+                    "Analyzing findings, writing Results, building the Discussion framework, and asking OpenAI to plan the evidence search..."
                 ):
                     analysis, result_text, queries = build_context_for_search(inputs, extracted_files)
                 st.session_state.analysis = analysis
@@ -1641,7 +1621,7 @@ with tabs[2]:
                 st.session_state.downloaded_references = []
                 st.session_state.gemini_recommendations = {}
                 st.session_state.followup_suggestions = {}
-                st.success("Results draft, Discussion framework, and Claude evidence plan are ready below.")
+                st.success("Results draft, Discussion framework, and OpenAI evidence plan are ready below.")
 
         analysis_state = st.session_state.get("analysis") or {}
         if analysis_state:
@@ -1693,8 +1673,6 @@ with tabs[2]:
                     model_used = discussion_framework.get("framework_model") or ""
                     if provider or model_used:
                         st.caption(f"Framework engine: {provider} {model_used}".strip())
-                    if discussion_framework.get("claude_framework_error"):
-                        st.warning(f"Claude framework warning: {discussion_framework.get('claude_framework_error')}")
                     if discussion_framework.get("style_priority"):
                         st.write("Style priority")
                         st.write(discussion_framework.get("style_priority"))
@@ -1717,33 +1695,33 @@ with tabs[2]:
                         for item in citation_strategy:
                             st.write(item)
 
-            claude_plan = analysis_state.get("claude_discussion_search_plan") or {}
-            if claude_plan:
-                with st.expander("Claude section-wise evidence plan", expanded=True):
-                    provider = claude_plan.get("query_provider") or "Claude"
-                    model_used = claude_plan.get("model_used") or st.session_state.claude_model
+            discussion_plan = analysis_state.get("discussion_search_plan") or {}
+            if discussion_plan:
+                with st.expander("OpenAI section-wise evidence plan", expanded=True):
+                    provider = discussion_plan.get("query_provider") or "OpenAI"
+                    model_used = discussion_plan.get("model_used") or st.session_state.model
                     st.caption(
                         f"{provider} planned what paper types are needed for Introduction, Methodology, and Discussion, then the same search engines use those queries."
                     )
                     if model_used:
                         st.caption(f"Model: {model_used}")
-                    if claude_plan.get("claude_query_error"):
-                        st.warning(f"Claude query planning warning: {claude_plan.get('claude_query_error')}")
+                    if discussion_plan.get("query_error"):
+                        st.warning(f"OpenAI query planning warning: {discussion_plan.get('query_error')}")
                     section_plan = section_plan_items_from_analysis(analysis_state, st.session_state.get("queries"))
                     if section_plan:
                         st.write("Section-wise evidence baskets")
                         st.dataframe(evidence_plan_rows(section_plan), width="stretch", hide_index=True)
-                    needed_types = claude_plan.get("needed_paper_types") or []
+                    needed_types = discussion_plan.get("needed_paper_types") or []
                     if needed_types:
                         st.write("Needed paper types")
                         for item in needed_types:
                             st.write(item)
-                    rationales = claude_plan.get("query_rationale") or []
+                    rationales = discussion_plan.get("query_rationale") or []
                     if rationales:
                         st.write("Why these queries were made")
                         for item in rationales:
                             st.write(item)
-                    missing_questions = claude_plan.get("missing_evidence_questions") or []
+                    missing_questions = discussion_plan.get("missing_evidence_questions") or []
                     if missing_questions:
                         st.write("Questions to answer through reading")
                         for item in missing_questions:
@@ -2496,8 +2474,8 @@ with tabs[3]:
         st.divider()
         st.subheader("Suggested Extra Evidence or Data")
         if st.button("Suggest missing papers, review support, thesis leads, or data checks", width="stretch"):
-            if not (st.session_state.claude_key or st.session_state.gemini_key or st.session_state.openai_key):
-                st.error("Enter a Claude, Gemini, or OpenAI key first.")
+            if not (st.session_state.gemini_key or st.session_state.openai_key):
+                st.error("Enter an OpenAI or Gemini key first.")
             else:
                 analysis = analysis_with_current_style(st.session_state.get("analysis") or {})
                 st.session_state.analysis = analysis
@@ -2510,8 +2488,6 @@ with tabs[3]:
                         style_profile=current_style_profile(),
                         gemini_key=st.session_state.gemini_key,
                         gemini_model=st.session_state.gemini_model,
-                        claude_key=st.session_state.claude_key,
-                        claude_model=st.session_state.claude_model,
                         openai_key=st.session_state.openai_key,
                         openai_model=st.session_state.model,
                     )
@@ -2522,8 +2498,8 @@ with tabs[3]:
             if suggestions.get("query_provider"):
                 model_note = f" ({suggestions.get('model_used')})" if suggestions.get("model_used") else ""
                 st.caption(f"Suggestion engine: {suggestions.get('query_provider')}{model_note}")
-            if suggestions.get("claude_query_error"):
-                st.warning(f"Claude follow-up planning warning: {suggestions.get('claude_query_error')}")
+            if suggestions.get("query_error"):
+                st.warning(f"Follow-up planning warning: {suggestions.get('query_error')}")
             search_queries = [
                 clean_query_text(query)
                 for query in suggestions.get("suggested_search_queries", [])
@@ -2716,7 +2692,7 @@ with tabs[4]:
     cols[3].metric("Tables", len(collect_tables(extracted_files)))
     cols[4].metric("Graphs", len(collect_images(extracted_files)))
     st.caption(
-        f"Discussion engine: {'Claude ' + st.session_state.claude_model if st.session_state.claude_key else 'OpenAI ' + st.session_state.model}"
+        f"Discussion engine: OpenAI {st.session_state.model}"
     )
 
     with st.expander("Results-first discussion framework", expanded=False):
@@ -2748,8 +2724,8 @@ with tabs[4]:
                     draft = generate_full_draft(
                         api_key=st.session_state.openai_key,
                         model=st.session_state.model,
-                        claude_key=st.session_state.claude_key,
-                        claude_model=st.session_state.claude_model,
+                        claude_key="",
+                        claude_model="",
                         paper_title=inputs["paper_title"],
                         authors=inputs["authors"],
                         affiliation=inputs["affiliation"],

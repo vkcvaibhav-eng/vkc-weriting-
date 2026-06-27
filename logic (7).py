@@ -1945,9 +1945,9 @@ population dynamics pest, treatment efficacy crop, or integrated pest management
         return fallback[:max_queries]
 
 
-def generate_claude_discussion_search_plan(
-    claude_key: str,
-    claude_model: str,
+def generate_openai_discussion_search_plan(
+    api_key: str,
+    model: str,
     analysis: dict[str, Any],
     context_text: str,
     result_text: str,
@@ -1968,9 +1968,12 @@ def generate_claude_discussion_search_plan(
         "thesis_mining_queries": [],
         "query_rationale": [],
         "missing_evidence_questions": [],
+        "query_error": "",
         "claude_query_error": "",
     }
-    if not claude_key:
+    if not api_key:
+        fallback["query_error"] = "OpenAI key is required for discussion evidence planning."
+        fallback["claude_query_error"] = fallback["query_error"]
         return fallback
 
     profile = build_search_intent_profile(analysis, context_text, result_text)
@@ -2053,13 +2056,13 @@ query_rationale: array of objects with query, target_evidence, why_this_query;
 missing_evidence_questions: array of brief questions the app should answer through search or reading.
 """
     try:
-        text = claude_text(
-            claude_key,
-            claude_model,
+        text = chat_text(
+            api_key,
+            model,
             "You are a premium scientific manuscript evidence planner.",
             prompt,
             temperature=0.1,
-            max_tokens=5000,
+            response_format={"type": "json_object"},
         )
         parsed = parse_json_object(text, fallback)
         for key, value in fallback.items():
@@ -2109,12 +2112,22 @@ missing_evidence_questions: array of brief questions the app should answer throu
                 }
             )
         parsed["section_evidence_plan"] = plan_items
-        parsed["query_provider"] = "Claude"
-        parsed["model_used"] = claude_model or DEFAULT_CLAUDE_MODEL
+        parsed["query_provider"] = "OpenAI"
+        parsed["model_used"] = model
         return parsed
     except Exception as exc:
+        fallback["query_error"] = str(exc)
         fallback["claude_query_error"] = str(exc)
         return fallback
+
+
+def generate_claude_discussion_search_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Backward-compatible alias; OpenAI is now the discussion evidence planner."""
+    if "claude_key" in kwargs and "api_key" not in kwargs:
+        kwargs["api_key"] = kwargs.pop("claude_key")
+    if "claude_model" in kwargs and "model" not in kwargs:
+        kwargs["model"] = kwargs.pop("claude_model")
+    return generate_openai_discussion_search_plan(*args, **kwargs)
 
 
 def normalize_title(title: str) -> str:
@@ -6028,6 +6041,7 @@ def suggest_style_aligned_followup_needs(
         "style_plan": [],
         "query_provider": "",
         "model_used": "",
+        "query_error": "",
         "claude_query_error": "",
     }
     compact_refs = []
@@ -6068,12 +6082,12 @@ for the original primary papers. Use review papers for broad synthesis, but plan
 specific methods, results, and discussion comparisons.
 Do not ask for unnecessary information. Only suggest what would materially improve the paper.
 """
-    if claude_key:
+    if openai_key:
         try:
-            text = claude_text(
-                claude_key,
-                claude_model,
-                "You are a premium scientific Discussion evidence planner and style-aware editor.",
+            text = chat_text(
+                openai_key,
+                openai_model,
+                "You are a scientific editor planning missing evidence searches and data checks.",
                 prompt
                 + """
 
@@ -6082,15 +6096,16 @@ our finding -> likely mechanism -> agreement or disagreement with original studi
 -> implication. Suggest only queries that fill a real evidence gap in that framework.
 """,
                 temperature=0.1,
-                max_tokens=5000,
+                response_format={"type": "json_object"},
             )
             parsed = parse_json_object(text, fallback)
             for key, value in fallback.items():
                 parsed.setdefault(key, value)
-            parsed["query_provider"] = "Claude"
-            parsed["model_used"] = claude_model or DEFAULT_CLAUDE_MODEL
+            parsed["query_provider"] = "OpenAI"
+            parsed["model_used"] = openai_model
             return parsed
         except Exception as exc:
+            fallback["query_error"] = str(exc)
             fallback["claude_query_error"] = str(exc)
     if gemini_key:
         try:
@@ -6105,26 +6120,6 @@ our finding -> likely mechanism -> agreement or disagreement with original studi
             return parsed
         except Exception:
             pass
-    if openai_key:
-        try:
-            text = chat_text(
-                openai_key,
-                openai_model,
-                "You are a scientific editor planning missing evidence searches and data checks.",
-                prompt,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            parsed = parse_json_object(text, fallback)
-            for key, value in fallback.items():
-                parsed.setdefault(key, value)
-            if not parsed.get("query_provider"):
-                parsed["query_provider"] = "OpenAI"
-            if not parsed.get("model_used"):
-                parsed["model_used"] = openai_model
-            return parsed
-        except Exception:
-            return fallback
     return fallback
 
 
@@ -7407,7 +7402,7 @@ def build_discussion_framework(
         ],
         "workflow": DISCUSSION_WORKFLOW_TEXT,
     }
-    if not (api_key or claude_key):
+    if not api_key:
         return fallback
 
     prompt = f"""
@@ -7483,27 +7478,6 @@ Rules:
   activity, mode of action, crop response, agreement/disagreement with previous results, and practical implication.
 """
     system_prompt = "You plan style-led scientific Discussion sections from results and literature evidence."
-    if claude_key:
-        try:
-            text = claude_text(
-                claude_key,
-                claude_model,
-                system_prompt,
-                prompt,
-                temperature=0.1,
-                max_tokens=5000,
-            )
-            parsed = parse_json_object(text, fallback)
-            for key, value in fallback.items():
-                parsed.setdefault(key, value)
-            parsed["framework_model"] = claude_model or DEFAULT_CLAUDE_MODEL
-            parsed["framework_provider"] = "Claude"
-            return parsed
-        except Exception as exc:
-            fallback["claude_framework_error"] = str(exc)
-            if not api_key:
-                return fallback
-
     try:
         text = chat_text(
             api_key,
@@ -7608,19 +7582,6 @@ Results section already drafted:
 {truncate_text(results_section, 7000)}
 """
     system_prompt = "You write discussion sections with careful literature comparison, strong logic, and style-led rhetoric."
-    if claude_key:
-        try:
-            return claude_text(
-                claude_key,
-                claude_model,
-                system_prompt,
-                prompt,
-                temperature=0.2,
-                max_tokens=7000,
-            )
-        except Exception:
-            if not api_key:
-                raise
     return chat_text(api_key, model, system_prompt, prompt, temperature=0.25)
 
 
@@ -7863,8 +7824,8 @@ def generate_full_draft(
         "results": results,
         "discussion_framework": discussion_framework,
         "discussion": discussion,
-        "discussion_provider": "Claude" if claude_key else "OpenAI",
-        "discussion_model": (claude_model or DEFAULT_CLAUDE_MODEL) if claude_key else model,
+        "discussion_provider": "OpenAI",
+        "discussion_model": model,
         "conclusion": conclusion,
         "references": references,
         "source_mined_references": source_mined_references,
