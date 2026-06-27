@@ -7434,12 +7434,22 @@ If a block is already acceptable, return the original text as revised_text.
                 rewrite_map[(section_key, block_index)] = revised_text
 
         revised = dict(draft)
+        rewrite_details: list[dict[str, Any]] = []
         for section_key, _section_name in SAPLING_MANUSCRIPT_SECTIONS:
             blocks = split_text_blocks(revised.get(section_key, ""))
             changed = False
             for index, block in enumerate(blocks):
                 replacement = rewrite_map.get((section_key, index))
                 if replacement:
+                    rewrite_details.append(
+                        {
+                            "section_key": section_key,
+                            "section": _section_name,
+                            "block_index": index,
+                            "original_text": block,
+                            "revised_text": replacement,
+                        }
+                    )
                     blocks[index] = replacement
                     changed = True
             if changed:
@@ -7457,6 +7467,7 @@ If a block is already acceptable, return the original text as revised_text.
         )
         revised["sapling_revision_applied"] = True
         revised["sapling_rewritten_blocks"] = len(rewrite_map)
+        revised["sapling_rewrite_details"] = rewrite_details
         revised["sapling_revision_note"] = "Sapling-guided academic revision applied once to flagged paragraph blocks."
         return revised
     except Exception as exc:

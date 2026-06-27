@@ -247,6 +247,7 @@ def init_state() -> None:
         "gemini_style_audit": {},
         "draft": {},
         "docx_bytes": None,
+        "sapling_revision_report": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1155,6 +1156,90 @@ def style_api_health_display(df: pd.DataFrame):
     return styler.applymap(color_status, subset=["status"])
 
 
+def sapling_score_float(audit: dict) -> float | None:
+    try:
+        score = audit.get("score")
+        return None if score is None else float(score)
+    except Exception:
+        return None
+
+
+def sapling_flagged_line_rows(audit: dict) -> pd.DataFrame:
+    rows = []
+    for item in audit.get("flagged_sentences") or []:
+        rows.append(
+            {
+                "type": "sentence",
+                "section": item.get("section", ""),
+                "score": item.get("score", ""),
+                "text": item.get("text", ""),
+            }
+        )
+    for item in audit.get("flagged_blocks") or []:
+        rows.append(
+            {
+                "type": "paragraph",
+                "section": item.get("section", ""),
+                "score": item.get("score", ""),
+                "text": item.get("text", ""),
+            }
+        )
+    return pd.DataFrame(rows, columns=["type", "section", "score", "text"])
+
+
+def sapling_comparison_rows(before: dict, after: dict) -> pd.DataFrame:
+    before_score = sapling_score_float(before)
+    after_score = sapling_score_float(after)
+    score_change = ""
+    if before_score is not None and after_score is not None:
+        score_change = round(after_score - before_score, 3)
+    rows = [
+        {
+            "metric": "Sapling score",
+            "before": "" if before_score is None else round(before_score, 3),
+            "after": "" if after_score is None else round(after_score, 3),
+            "change": score_change,
+        },
+        {
+            "metric": "Flagged paragraph blocks",
+            "before": len(before.get("flagged_blocks") or []),
+            "after": len(after.get("flagged_blocks") or []),
+            "change": len(after.get("flagged_blocks") or []) - len(before.get("flagged_blocks") or []),
+        },
+        {
+            "metric": "Flagged sentences",
+            "before": len(before.get("flagged_sentences") or []),
+            "after": len(after.get("flagged_sentences") or []),
+            "change": len(after.get("flagged_sentences") or []) - len(before.get("flagged_sentences") or []),
+        },
+    ]
+    return pd.DataFrame(rows, columns=["metric", "before", "after", "change"])
+
+
+def display_sapling_audit_report(audit: dict, label: str = "Sapling report") -> None:
+    if not audit:
+        st.info(f"{label} has not been run.")
+        return
+    if audit.get("error"):
+        st.error(audit.get("summary") or audit.get("error"))
+        return
+    score = sapling_score_float(audit)
+    target = float(audit.get("target_score") or st.session_state.get("sapling_target_score", DEFAULT_SAPLING_TARGET_SCORE))
+    cols = st.columns(4)
+    cols[0].metric("Score", "not returned" if score is None else f"{score:.3f}")
+    cols[1].metric("Target", f"{target:.3f}")
+    cols[2].metric("Flagged blocks", len(audit.get("flagged_blocks") or []))
+    cols[3].metric("Flagged sentences", len(audit.get("flagged_sentences") or []))
+    st.write(audit.get("summary", ""))
+    if audit.get("section_scores"):
+        with st.expander(f"{label}: section scores", expanded=False):
+            st.dataframe(pd.DataFrame(audit["section_scores"]), width="stretch", hide_index=True)
+    flagged_df = sapling_flagged_line_rows(audit)
+    if not flagged_df.empty:
+        with st.expander(f"{label}: detected lines and paragraphs", expanded=True):
+            st.dataframe(flagged_df, width="stretch", hide_index=True)
+
+
 PAPER_TABLE_DISABLED_COLUMNS = [
     "title",
     "pdf_status",
@@ -1366,7 +1451,16 @@ with st.sidebar:
 st.title("Research Paper Writing App")
 st.caption("Choose an author writing style, search and read evidence, draft in that style, then run the Academic Style Polisher and final evidence check.")
 
-tabs = st.tabs(["Inputs", "Writing Style", "Evidence Search", "Gemini Reading", "Draft Preview", "Academic Style Polisher", "Export"])
+tabs = st.tabs([
+    "Inputs",
+    "Writing Style",
+    "Evidence Search",
+    "Gemini Reading",
+    "Draft Preview",
+    "Academic Style Polisher",
+    "AI Quality Audit",
+    "Export",
+])
 
 
 with tabs[0]:
@@ -1503,6 +1597,7 @@ with tabs[0]:
                 st.session_state.docx_bytes = None
                 st.session_state.draft = {}
                 st.session_state.sapling_audit = {}
+                st.session_state.sapling_revision_report = {}
                 st.session_state.sapling_export_confirmed = False
                 if errors:
                     st.error("\n".join(errors))
@@ -1616,6 +1711,7 @@ with tabs[1]:
             st.session_state.openai_style_audit = {}
             st.session_state.gemini_style_audit = {}
             st.session_state.sapling_audit = {}
+            st.session_state.sapling_revision_report = {}
             st.session_state.sapling_export_confirmed = False
             st.session_state.docx_bytes = None
             st.success(f"Loaded {contract.get('characters', 0)} characters from {contract.get('author')}.")
@@ -1656,6 +1752,7 @@ with tabs[1]:
                     st.session_state.openai_style_audit = {}
                     st.session_state.gemini_style_audit = {}
                     st.session_state.sapling_audit = {}
+                    st.session_state.sapling_revision_report = {}
                     st.session_state.sapling_export_confirmed = False
                     st.session_state.docx_bytes = None
                 except Exception as exc:
@@ -2926,6 +3023,7 @@ with tabs[4]:
                     st.session_state.openai_style_audit = {}
                     st.session_state.gemini_style_audit = {}
                     st.session_state.sapling_audit = {}
+                    st.session_state.sapling_revision_report = {}
                     st.session_state.sapling_export_confirmed = False
                     st.session_state.docx_bytes = None
                     st.success("Draft generated.")
@@ -3104,6 +3202,7 @@ with tabs[5]:
                             st.session_state.get("gemini_style_audit"),
                         )
                         st.session_state.sapling_audit = {}
+                        st.session_state.sapling_revision_report = {}
                         st.session_state.sapling_export_confirmed = False
                         st.session_state.docx_bytes = None
                     st.success("Final academic polish applied. Run Sapling Quality Audit again for a fresh readiness score.")
@@ -3167,8 +3266,150 @@ with tabs[5]:
                         st.markdown("**Flagged sentences**")
                         st.dataframe(pd.DataFrame(sapling_audit["flagged_sentences"]), width="stretch", hide_index=True)
 
-
 with tabs[6]:
+    st.subheader("AI Quality Audit")
+    st.caption(
+        "Sapling is used here as an academic prose-quality signal. "
+        "The revision step rewrites flagged prose once in the selected author style while preserving facts, values, citations, and section meaning."
+    )
+    draft = st.session_state.get("draft") or {}
+    profile = current_style_profile()
+
+    if not draft:
+        st.info("Generate a draft before running the AI Quality Audit.")
+    elif not profile:
+        st.warning("Load a writing style report first so revisions can follow the selected author style.")
+    else:
+        sapling_audit = st.session_state.get("sapling_audit") or {}
+        sapling_report = st.session_state.get("sapling_revision_report") or {}
+        current_score = sapling_score_float(sapling_audit)
+        current_display = "not run" if current_score is None else f"{current_score:.3f}"
+        target_score = float(st.session_state.get("sapling_target_score", DEFAULT_SAPLING_TARGET_SCORE))
+
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Current score", current_display)
+        metric_cols[1].metric("Target", f"{target_score:.3f}")
+        metric_cols[2].metric("Current flagged blocks", len(sapling_audit.get("flagged_blocks") or []))
+        metric_cols[3].metric("Current flagged sentences", len(sapling_audit.get("flagged_sentences") or []))
+
+        action_left, action_right = st.columns(2)
+        with action_left:
+            if st.button("Run Sapling Detection Audit", type="primary", width="stretch", key="run_ai_quality_sapling_audit"):
+                if not st.session_state.sapling_key:
+                    st.error("Enter a Sapling API key first.")
+                else:
+                    with st.spinner("Sapling is checking the draft section by section..."):
+                        st.session_state.sapling_audit = audit_draft_with_sapling_quality(
+                            st.session_state.sapling_key,
+                            draft,
+                            target_score=st.session_state.sapling_target_score,
+                        )
+                        st.session_state.sapling_revision_report = {}
+                        st.session_state.sapling_export_confirmed = False
+                    if st.session_state.sapling_audit.get("error"):
+                        st.error(st.session_state.sapling_audit.get("summary") or st.session_state.sapling_audit.get("error"))
+                    else:
+                        st.success("Sapling detection audit complete.")
+
+        with action_right:
+            if st.button(
+                "Revise Detected Lines and Re-check",
+                width="stretch",
+                key="revise_ai_quality_detected_lines",
+            ):
+                if not st.session_state.openai_key:
+                    st.error("Enter an OpenAI API key first.")
+                elif not st.session_state.sapling_key:
+                    st.error("Enter a Sapling API key first.")
+                else:
+                    with st.spinner("Auditing, revising flagged prose in the selected author style, then re-checking once..."):
+                        before_audit = st.session_state.get("sapling_audit") or {}
+                        if not before_audit:
+                            before_audit = audit_draft_with_sapling_quality(
+                                st.session_state.sapling_key,
+                                draft,
+                                target_score=st.session_state.sapling_target_score,
+                            )
+                        st.session_state.sapling_audit = before_audit
+                        if before_audit.get("error"):
+                            st.session_state.sapling_revision_report = {
+                                "before_audit": before_audit,
+                                "after_audit": {},
+                                "rewrite_details": [],
+                                "rewritten_blocks": 0,
+                            }
+                        elif not (before_audit.get("flagged_blocks") or []):
+                            st.session_state.sapling_revision_report = {
+                                "before_audit": before_audit,
+                                "after_audit": before_audit,
+                                "rewrite_details": [],
+                                "rewritten_blocks": 0,
+                            }
+                        else:
+                            revised_draft = revise_draft_with_sapling_quality(
+                                st.session_state.openai_key,
+                                st.session_state.model,
+                                draft,
+                                profile,
+                                before_audit,
+                            )
+                            after_audit = audit_draft_with_sapling_quality(
+                                st.session_state.sapling_key,
+                                revised_draft,
+                                target_score=st.session_state.sapling_target_score,
+                            )
+                            st.session_state.draft = revised_draft
+                            st.session_state.sapling_audit = after_audit
+                            st.session_state.sapling_revision_report = {
+                                "before_audit": before_audit,
+                                "after_audit": after_audit,
+                                "rewrite_details": revised_draft.get("sapling_rewrite_details") or [],
+                                "rewritten_blocks": revised_draft.get("sapling_rewritten_blocks", 0),
+                            }
+                            st.session_state.sapling_export_confirmed = False
+                            st.session_state.docx_bytes = None
+                    report = st.session_state.get("sapling_revision_report") or {}
+                    after_audit = report.get("after_audit") or {}
+                    if (report.get("before_audit") or {}).get("error"):
+                        st.error((report.get("before_audit") or {}).get("summary") or "Sapling audit did not complete.")
+                    elif not report.get("rewritten_blocks"):
+                        st.info("No Sapling paragraph blocks were available for revision.")
+                    elif after_audit.get("error"):
+                        st.warning("Revision was applied, but the re-check did not complete.")
+                    else:
+                        st.success("Detected prose was revised in the selected style and Sapling re-check is complete.")
+
+        sapling_report = st.session_state.get("sapling_revision_report") or {}
+        before_audit = sapling_report.get("before_audit") or {}
+        after_audit = sapling_report.get("after_audit") or {}
+        if before_audit or after_audit:
+            st.markdown("### Before / After Re-check")
+            comparison = sapling_comparison_rows(before_audit, after_audit)
+            st.dataframe(comparison, width="stretch", hide_index=True)
+            rewrite_details = sapling_report.get("rewrite_details") or []
+            if rewrite_details:
+                with st.expander("Rewritten flagged paragraphs", expanded=True):
+                    st.dataframe(
+                        pd.DataFrame(rewrite_details)[["section", "block_index", "original_text", "revised_text"]],
+                        width="stretch",
+                        hide_index=True,
+                    )
+            col_before, col_after = st.columns(2)
+            with col_before:
+                display_sapling_audit_report(before_audit, "Before revision")
+            with col_after:
+                display_sapling_audit_report(after_audit, "After re-check")
+        else:
+            st.markdown("### Current Sapling Report")
+            display_sapling_audit_report(st.session_state.get("sapling_audit") or {}, "Current audit")
+
+        st.info(
+            "If the re-check still flags some lines, use the remaining flagged table as an editing map. "
+            "The app does not run an automatic repeated optimization loop; each revision preserves the manuscript facts and citations."
+        )
+
+
+with tabs[7]:
     st.subheader("Export")
     draft = st.session_state.get("draft") or {}
     if not draft:
@@ -3192,7 +3433,7 @@ with tabs[6]:
             sapling_requires_confirmation = True
             st.warning(
                 f"Sapling quality score is {float(sapling_score):.3f}, above the target {sapling_target:.3f}. "
-                "You can export after confirming, or return to Academic Style Polisher for Sapling-guided revision."
+                "You can export after confirming, or return to AI Quality Audit for Sapling-guided revision and re-check."
             )
             st.checkbox(
                 "I reviewed the Sapling report and want to build the DOCX anyway.",
