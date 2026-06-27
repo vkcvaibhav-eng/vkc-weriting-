@@ -12,9 +12,11 @@ importlib.reload(logic_module)
 
 from logic import (
     DISCUSSION_WORKFLOW_TEXT,
+    DEFAULT_APIFY_GOOGLE_SCHOLAR_ACTOR,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_PERPLEXITY_MODEL,
     DEFAULT_SAPLING_TARGET_SCORE,
+    DEFAULT_SEARCH_PROVIDER_MODE,
     DEFAULT_SHELTON_STYLE_PATH,
     MIN_REFERENCE_COUNT,
     STYLE_PRESETS,
@@ -45,6 +47,7 @@ from logic import (
     recommend_writing_style,
     reference_metadata_missing,
     rerank_papers_after_gemini,
+    run_api_health_checks,
     revise_draft_with_sapling_quality,
     revise_draft_with_style_audits,
     review_primary_study_search_queries,
@@ -81,6 +84,20 @@ API_SECRET_NAMES = {
         "serpapi_api_key",
         "serpapi.key",
         "serpapi.api_key",
+    ),
+    "searchapi_key": (
+        "SEARCHAPI_API_KEY",
+        "SEARCHAPI_KEY",
+        "searchapi_api_key",
+        "searchapi.key",
+        "searchapi.api_key",
+    ),
+    "apify_token": (
+        "APIFY_API_TOKEN",
+        "APIFY_TOKEN",
+        "apify_api_token",
+        "apify.token",
+        "apify.api_token",
     ),
     "semantic_key": (
         "SEMANTIC_SCHOLAR_API_KEY",
@@ -123,6 +140,8 @@ API_SECRET_NAMES = {
 
 API_SECRETS_TEMPLATE = """OPENAI_API_KEY = "your-openai-key"
 SERPAPI_API_KEY = "your-serpapi-key"
+SEARCHAPI_API_KEY = "your-searchapi-key"
+APIFY_API_TOKEN = "your-apify-token"
 SEMANTIC_SCHOLAR_API_KEY = "your-semantic-scholar-key"
 CORE_API_KEY = "your-core-key"
 PERPLEXITY_API_KEY = "your-perplexity-key"
@@ -181,6 +200,10 @@ def init_state() -> None:
     defaults = {
         "openai_key": "",
         "serpapi_key": "",
+        "searchapi_key": "",
+        "apify_token": "",
+        "apify_actor": DEFAULT_APIFY_GOOGLE_SCHOLAR_ACTOR,
+        "search_provider_mode": DEFAULT_SEARCH_PROVIDER_MODE,
         "semantic_key": "",
         "core_key": "",
         "perplexity_key": "",
@@ -188,6 +211,7 @@ def init_state() -> None:
         "gemini_key": "",
         "gemini_model": DEFAULT_GEMINI_MODEL,
         "sapling_key": "",
+        "api_health_report": [],
         "sapling_audit": {},
         "sapling_target_score": DEFAULT_SAPLING_TARGET_SCORE,
         "sapling_export_confirmed": False,
@@ -1066,6 +1090,71 @@ def paper_rows(papers: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def provider_stats_rows(provider_stats: dict) -> pd.DataFrame:
+    rows = []
+    for provider, stats in (provider_stats or {}).items():
+        queries = int(stats.get("queries", 0) or 0)
+        results = int(stats.get("results", 0) or 0)
+        errors = int(stats.get("errors", 0) or 0)
+        notes = "; ".join([str(note) for note in stats.get("notes", []) if note])
+        if queries or results or errors or notes:
+            rows.append(
+                {
+                    "provider": provider,
+                    "queries": queries,
+                    "results_added": results,
+                    "errors": errors,
+                    "notes": notes,
+                }
+            )
+    return pd.DataFrame(rows, columns=["provider", "queries", "results_added", "errors", "notes"])
+
+
+def api_health_display_frame(report: list[dict]) -> pd.DataFrame:
+    status_labels = {
+        "working": "WORKING",
+        "rate_limited": "RATE LIMITED",
+        "missing_key": "MISSING KEY",
+        "bad_key": "BAD KEY",
+        "error": "ERROR",
+    }
+    rows = []
+    for item in report or []:
+        status = str(item.get("status") or "")
+        rows.append(
+            {
+                "service": item.get("service", ""),
+                "key_loaded": "yes" if item.get("key_loaded") else "no",
+                "status": status_labels.get(status, status.upper() or "UNKNOWN"),
+                "http_status": item.get("http_status", ""),
+                "result_count": item.get("result_count", ""),
+                "message": item.get("message", ""),
+                "checked_at": item.get("checked_at", ""),
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=["service", "key_loaded", "status", "http_status", "result_count", "message", "checked_at"],
+    )
+
+
+def style_api_health_display(df: pd.DataFrame):
+    def color_status(value: str) -> str:
+        normalized = str(value or "").lower()
+        if "working" in normalized:
+            return "background-color: #dcfce7; color: #166534; font-weight: 700;"
+        if "rate" in normalized or "missing" in normalized:
+            return "background-color: #fef3c7; color: #92400e; font-weight: 700;"
+        if "bad" in normalized or "error" in normalized:
+            return "background-color: #fee2e2; color: #991b1b; font-weight: 700;"
+        return ""
+
+    styler = df.style
+    if hasattr(styler, "map"):
+        return styler.map(color_status, subset=["status"])
+    return styler.applymap(color_status, subset=["status"])
+
+
 PAPER_TABLE_DISABLED_COLUMNS = [
     "title",
     "pdf_status",
@@ -1141,6 +1230,31 @@ with st.sidebar:
     st.divider()
     st.subheader("Reference Search")
     configure_api_key("SerpAPI key", "serpapi_key")
+    configure_api_key("SearchApi key", "searchapi_key")
+    configure_api_key("Apify API token", "apify_token")
+    provider_modes = [
+        "Quota-aware fallback",
+        "Use all providers for deep search",
+        "SerpAPI only",
+        "SearchApi only",
+        "Apify deep fallback only",
+    ]
+    if st.session_state.search_provider_mode not in provider_modes:
+        st.session_state.search_provider_mode = DEFAULT_SEARCH_PROVIDER_MODE
+    st.session_state.search_provider_mode = st.selectbox(
+        "Search provider mode",
+        provider_modes,
+        index=provider_modes.index(st.session_state.search_provider_mode),
+        help=(
+            "Quota-aware fallback keeps SerpAPI as primary, uses SearchApi when SerpAPI gives few results, "
+            "and uses Apify only when the candidate pool is thin."
+        ),
+    )
+    st.session_state.apify_actor = st.text_input(
+        "Apify Google Scholar actor",
+        value=st.session_state.apify_actor,
+        help="Use an Apify actor ID such as username/actor-name. Default is a Google Scholar scraper actor.",
+    )
     configure_api_key("Semantic Scholar key", "semantic_key")
     configure_api_key("CORE API key", "core_key")
     configure_api_key("Perplexity Sonar key", "perplexity_key")
@@ -1164,6 +1278,40 @@ with st.sidebar:
         format="%.2f",
         help="Soft readiness target only. Sapling is used as a quality signal for generic prose, not as proof of authorship.",
     )
+
+    with st.expander("API Health Check", expanded=False):
+        st.caption(
+            "Manual diagnostic only. It checks loaded keys with tiny requests and never displays secret values."
+        )
+        if st.button("Run API Health Check", type="secondary", width="stretch"):
+            with st.spinner("Checking API keys and endpoints..."):
+                st.session_state.api_health_report = run_api_health_checks(
+                    {
+                        "openai_key": st.session_state.openai_key,
+                        "model": st.session_state.model,
+                        "serpapi_key": st.session_state.serpapi_key,
+                        "searchapi_key": st.session_state.searchapi_key,
+                        "apify_token": st.session_state.apify_token,
+                        "apify_actor": st.session_state.apify_actor,
+                        "semantic_key": st.session_state.semantic_key,
+                        "core_key": st.session_state.core_key,
+                        "perplexity_key": st.session_state.perplexity_key,
+                        "perplexity_model": st.session_state.perplexity_model,
+                        "gemini_key": st.session_state.gemini_key,
+                        "gemini_model": st.session_state.gemini_model,
+                        "sapling_key": st.session_state.sapling_key,
+                    }
+                )
+        health_report = st.session_state.get("api_health_report") or []
+        if health_report:
+            health_df = api_health_display_frame(health_report)
+            st.dataframe(style_api_health_display(health_df), width="stretch", hide_index=True)
+            st.caption(
+                "Working = key and endpoint responded. Rate limited = quota/public-limit issue. "
+                "Missing key = not loaded. Bad key = authentication failed. Error = safe network/API summary."
+            )
+        else:
+            st.info("Click the button to check OpenAI, SerpAPI, SearchApi, Apify, Semantic Scholar, CORE, Perplexity, Gemini, and Sapling.")
 
     st.divider()
     st.subheader("Writing Length")
@@ -1576,7 +1724,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Reference Search, Sorting, Filtering, and PDF Reading")
     st.caption(
-        "Searches Google Scholar, Semantic Scholar, OpenAlex, CORE, Google PDF results, ResearchGate public pages, thesis repositories, and Perplexity Sonar when keys are available."
+        "Searches Google Scholar through SerpAPI/SearchApi, Semantic Scholar, OpenAlex, CORE, Google PDF results, ResearchGate public pages, thesis repositories, Perplexity Sonar, and optional Apify deep fallback when keys are available."
     )
     inputs = current_input_values()
     extracted_files = current_extracted_files()
@@ -1778,6 +1926,10 @@ with tabs[2]:
                         context_text=context_text,
                         semantic_key=st.session_state.semantic_key,
                         serpapi_key=st.session_state.serpapi_key,
+                        searchapi_key=st.session_state.searchapi_key,
+                        apify_token=st.session_state.apify_token,
+                        apify_actor=st.session_state.apify_actor,
+                        search_provider_mode=st.session_state.search_provider_mode,
                         core_key=st.session_state.core_key,
                         perplexity_key=st.session_state.perplexity_key,
                         perplexity_model=st.session_state.perplexity_model,
@@ -1807,6 +1959,16 @@ with tabs[2]:
 
         search_result = st.session_state.get("paper_search") or {}
         deep_queries = search_result.get("deep_queries") or {}
+        provider_stats = search_result.get("provider_stats") or {}
+        if provider_stats:
+            with st.expander("Search provider status", expanded=True):
+                st.caption(
+                    f"Provider mode: {search_result.get('provider_mode') or st.session_state.search_provider_mode}. "
+                    "SearchApi helps when SerpAPI is thin; Apify is used only when the selected mode or fallback calls for deep expansion."
+                )
+                stats_df = provider_stats_rows(provider_stats)
+                if not stats_df.empty:
+                    st.dataframe(stats_df, width="stretch", hide_index=True)
         if deep_queries:
             with st.expander("Independent agri deep-search queries", expanded=False):
                 for label, key in [
@@ -2045,6 +2207,7 @@ with tabs[2]:
                             downloaded = download_and_read_selected_papers(
                                 selected_papers,
                                 serpapi_key=st.session_state.serpapi_key,
+                                searchapi_key=st.session_state.searchapi_key,
                                 core_key=st.session_state.core_key,
                                 semantic_key=st.session_state.semantic_key,
                             )
@@ -2262,6 +2425,10 @@ with tabs[3]:
                                 context_text=context_text,
                                 semantic_key=st.session_state.semantic_key,
                                 serpapi_key=st.session_state.serpapi_key,
+                                searchapi_key=st.session_state.searchapi_key,
+                                apify_token=st.session_state.apify_token,
+                                apify_actor=st.session_state.apify_actor,
+                                search_provider_mode=st.session_state.search_provider_mode,
                                 core_key=st.session_state.core_key,
                                 perplexity_key=st.session_state.perplexity_key,
                                 perplexity_model=st.session_state.perplexity_model,
@@ -2355,6 +2522,10 @@ with tabs[3]:
                                 context_text=context_text,
                                 semantic_key=st.session_state.semantic_key,
                                 serpapi_key=st.session_state.serpapi_key,
+                                searchapi_key=st.session_state.searchapi_key,
+                                apify_token=st.session_state.apify_token,
+                                apify_actor=st.session_state.apify_actor,
+                                search_provider_mode=st.session_state.search_provider_mode,
                                 core_key=st.session_state.core_key,
                                 perplexity_key=st.session_state.perplexity_key,
                                 perplexity_model=st.session_state.perplexity_model,
@@ -2430,6 +2601,10 @@ with tabs[3]:
                                 context_text=context_text,
                                 semantic_key=st.session_state.semantic_key,
                                 serpapi_key=st.session_state.serpapi_key,
+                                searchapi_key=st.session_state.searchapi_key,
+                                apify_token=st.session_state.apify_token,
+                                apify_actor=st.session_state.apify_actor,
+                                search_provider_mode=st.session_state.search_provider_mode,
                                 core_key=st.session_state.core_key,
                                 perplexity_key=st.session_state.perplexity_key,
                                 perplexity_model=st.session_state.perplexity_model,
@@ -2524,12 +2699,16 @@ with tabs[3]:
                     with st.spinner("Searching suggested evidence with the same scholarly search engine..."):
                         extra_search = search_and_rank_papers(
                             queries=search_queries,
-                            context_text=context_text,
-                            semantic_key=st.session_state.semantic_key,
-                            serpapi_key=st.session_state.serpapi_key,
-                            core_key=st.session_state.core_key,
-                            perplexity_key=st.session_state.perplexity_key,
-                            perplexity_model=st.session_state.perplexity_model,
+                                context_text=context_text,
+                                semantic_key=st.session_state.semantic_key,
+                                serpapi_key=st.session_state.serpapi_key,
+                                searchapi_key=st.session_state.searchapi_key,
+                                apify_token=st.session_state.apify_token,
+                                apify_actor=st.session_state.apify_actor,
+                                search_provider_mode=st.session_state.search_provider_mode,
+                                core_key=st.session_state.core_key,
+                                perplexity_key=st.session_state.perplexity_key,
+                                perplexity_model=st.session_state.perplexity_model,
                             openai_key=st.session_state.openai_key,
                             model=st.session_state.model,
                             reference_count=st.session_state.reference_count,

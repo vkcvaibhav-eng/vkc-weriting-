@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urljoin, urlparse
@@ -68,6 +69,9 @@ MIN_REFERENCE_COUNT = MIN_RESEARCH_ARTICLES + MIN_THESES + MIN_REVIEW_PAPERS
 DEFAULT_PERPLEXITY_MODEL = "sonar-pro"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+DEFAULT_SEARCH_PROVIDER_MODE = "Quota-aware fallback"
+DEFAULT_APIFY_GOOGLE_SCHOLAR_ACTOR = "marco.gullo/google-scholar-scraper"
+SEARCHAPI_SEARCH_URL = "https://www.searchapi.io/api/v1/search"
 SAPLING_AIDETECT_URL = "https://api.sapling.ai/api/v1/aidetect"
 DEFAULT_SAPLING_TARGET_SCORE = 0.10
 SAPLING_SENTENCE_FLAG_SCORE = 0.35
@@ -289,6 +293,301 @@ def get_llm_client(api_key: str, base_url: str | None = None) -> OpenAI:
     if not SSL_VERIFY:
         kwargs["http_client"] = httpx.Client(verify=False, timeout=120)
     return OpenAI(**kwargs)
+
+
+def api_health_checked_at() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def sanitize_api_health_message(message: Any, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    text = re.sub(r"([?&](?:api_key|key|token|access_token)=)[^&\s]+", r"\1[redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"(Authorization:\s*Bearer\s+)[A-Za-z0-9._~+\-/=]+", r"\1[redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:sk-|pplx-|AIza|apify_api_)[A-Za-z0-9._~+\-/=]{12,}\b", "[redacted]", text)
+    text = re.sub(r"\b[A-Za-z0-9_\-]{48,}\b", "[redacted]", text)
+    return truncate_text(text, limit)
+
+
+def api_health_result(
+    service: str,
+    key_loaded: bool,
+    status: str,
+    http_status: int | str = "",
+    result_count: int | str = "",
+    message: str = "",
+) -> dict[str, Any]:
+    clean_message = sanitize_api_health_message(message)
+    if status not in {"working", "missing_key"}:
+        lowered = clean_message.lower()
+        if "rate limit" in lowered or "too many requests" in lowered or "429" in lowered:
+            status = "rate_limited"
+        elif (
+            "api key" in lowered
+            and any(token in lowered for token in ["invalid", "not valid", "incorrect", "provided", "auth"])
+        ) or "authentication token is not valid" in lowered or "unauthorized" in lowered:
+            status = "bad_key"
+    return {
+        "service": service,
+        "key_loaded": bool(key_loaded),
+        "status": status,
+        "http_status": http_status,
+        "result_count": result_count,
+        "message": clean_message,
+        "checked_at": api_health_checked_at(),
+    }
+
+
+def response_error_message(response: requests.Response) -> str:
+    try:
+        data = response.json()
+    except Exception:
+        return response.text[:240]
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            return error.get("message") or error.get("type") or json.dumps(error, ensure_ascii=True)[:240]
+        if isinstance(error, str):
+            return error
+        return data.get("message") or data.get("detail") or data.get("errorMessage") or json.dumps(data, ensure_ascii=True)[:240]
+    return str(data)[:240]
+
+
+def status_for_health_response(response: requests.Response) -> str:
+    if response.status_code in {200, 201, 202, 204}:
+        return "working"
+    if response.status_code == 429:
+        return "rate_limited"
+    if response.status_code in {401, 403}:
+        return "bad_key"
+    return "error"
+
+
+def health_request_error(exc: Exception) -> str:
+    if isinstance(exc, requests.Timeout):
+        return "Request timed out."
+    if isinstance(exc, requests.ConnectionError):
+        return "Connection error."
+    return sanitize_api_health_message(exc.__class__.__name__)
+
+
+def check_semantic_scholar_health(api_key: str = "") -> dict[str, Any]:
+    service = "Semantic Scholar"
+    if not api_key:
+        return api_health_result(service, False, "missing_key", message="No Semantic Scholar key is loaded.")
+    try:
+        response = requests.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={"query": "spider mite okra", "limit": 1, "fields": "title,year,url"},
+            headers={"x-api-key": api_key},
+            timeout=20,
+            verify=SSL_VERIFY,
+        )
+        status = status_for_health_response(response)
+        result_count = ""
+        message = response_error_message(response) if status != "working" else "Semantic Scholar search responded."
+        if status == "working":
+            data = response.json()
+            result_count = len(data.get("data", []) or [])
+        return api_health_result(service, True, status, response.status_code, result_count, message)
+    except Exception as exc:
+        return api_health_result(service, True, "error", message=health_request_error(exc))
+
+
+def check_core_health(api_key: str = "") -> dict[str, Any]:
+    service = "CORE"
+    if not api_key:
+        return api_health_result(service, False, "missing_key", message="No CORE key is loaded.")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = requests.get(
+            "https://api.core.ac.uk/v3/search/works",
+            params={"q": "spider mite okra", "limit": 1},
+            headers=headers,
+            timeout=25,
+            verify=SSL_VERIFY,
+        )
+        status = status_for_health_response(response)
+        message = response_error_message(response) if status != "working" else "CORE works search responded."
+        result_count: int | str = ""
+        if status == "working":
+            data = response.json()
+            result_count = len(data.get("results", []) or [])
+        return api_health_result(service, True, status, response.status_code, result_count, message)
+    except Exception as exc:
+        return api_health_result(service, True, "error", message=health_request_error(exc))
+
+
+def check_serpapi_health(api_key: str = "") -> dict[str, Any]:
+    service = "SerpAPI"
+    if not api_key:
+        return api_health_result(service, False, "missing_key", message="No SerpAPI key is loaded.")
+    try:
+        response = requests.get(
+            "https://serpapi.com/account.json",
+            params={"api_key": api_key},
+            timeout=20,
+            verify=SSL_VERIFY,
+        )
+        status = status_for_health_response(response)
+        message = response_error_message(response) if status != "working" else "SerpAPI account endpoint responded."
+        return api_health_result(service, True, status, response.status_code, "", message)
+    except Exception:
+        try:
+            response = requests.get(
+                "https://serpapi.com/search.json",
+                params={"engine": "google_scholar", "q": "spider mite okra", "num": 1, "api_key": api_key},
+                timeout=25,
+                verify=SSL_VERIFY,
+            )
+            status = status_for_health_response(response)
+            result_count: int | str = ""
+            message = response_error_message(response) if status != "working" else "SerpAPI Scholar search responded."
+            if status == "working":
+                result_count = len((response.json() or {}).get("organic_results", []) or [])
+            return api_health_result(service, True, status, response.status_code, result_count, message)
+        except Exception as exc:
+            return api_health_result(service, True, "error", message=health_request_error(exc))
+
+
+def check_searchapi_health(api_key: str = "") -> dict[str, Any]:
+    service = "SearchApi"
+    if not api_key:
+        return api_health_result(service, False, "missing_key", message="No SearchApi key is loaded.")
+    try:
+        response = requests.get(
+            SEARCHAPI_SEARCH_URL,
+            params={"engine": "google_scholar", "q": "spider mite okra", "num": 1, "api_key": api_key},
+            timeout=25,
+            verify=SSL_VERIFY,
+        )
+        status = status_for_health_response(response)
+        result_count: int | str = ""
+        message = response_error_message(response) if status != "working" else "SearchApi Google Scholar responded."
+        if status == "working":
+            result_count = len((response.json() or {}).get("organic_results", []) or [])
+        return api_health_result(service, True, status, response.status_code, result_count, message)
+    except Exception as exc:
+        return api_health_result(service, True, "error", message=health_request_error(exc))
+
+
+def check_apify_health(api_token: str = "", actor_id: str = DEFAULT_APIFY_GOOGLE_SCHOLAR_ACTOR) -> dict[str, Any]:
+    service = "Apify"
+    if not api_token:
+        return api_health_result(service, False, "missing_key", message="No Apify token is loaded.")
+    try:
+        user_response = requests.get(
+            "https://api.apify.com/v2/users/me",
+            params={"token": api_token},
+            timeout=20,
+            verify=SSL_VERIFY,
+        )
+        user_status = status_for_health_response(user_response)
+        if user_status != "working":
+            return api_health_result(service, True, user_status, user_response.status_code, "", response_error_message(user_response))
+        normalized_actor = normalize_apify_actor_id(actor_id)
+        actor_response = requests.get(
+            f"https://api.apify.com/v2/acts/{quote(normalized_actor, safe='~')}",
+            params={"token": api_token},
+            timeout=20,
+            verify=SSL_VERIFY,
+        )
+        actor_status = status_for_health_response(actor_response)
+        message = response_error_message(actor_response) if actor_status != "working" else f"Token works; actor metadata found for {normalized_actor}."
+        return api_health_result(service, True, actor_status, actor_response.status_code, "", message)
+    except Exception as exc:
+        return api_health_result(service, True, "error", message=health_request_error(exc))
+
+
+def check_perplexity_health(api_key: str = "", model: str = DEFAULT_PERPLEXITY_MODEL) -> dict[str, Any]:
+    service = "Perplexity"
+    if not api_key:
+        return api_health_result(service, False, "missing_key", message="No Perplexity key is loaded.")
+    try:
+        response = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model or DEFAULT_PERPLEXITY_MODEL,
+                "messages": [{"role": "user", "content": "Reply OK only."}],
+                "max_tokens": 4,
+                "temperature": 0,
+            },
+            timeout=30,
+            verify=SSL_VERIFY,
+        )
+        status = status_for_health_response(response)
+        message = response_error_message(response) if status != "working" else "Perplexity chat endpoint responded."
+        return api_health_result(service, True, status, response.status_code, "", message)
+    except Exception as exc:
+        return api_health_result(service, True, "error", message=health_request_error(exc))
+
+
+def check_gemini_health(api_key: str = "", model: str = DEFAULT_GEMINI_MODEL) -> dict[str, Any]:
+    service = "Google Gemini"
+    if not api_key:
+        return api_health_result(service, False, "missing_key", message="No Gemini key is loaded.")
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model or DEFAULT_GEMINI_MODEL}:generateContent",
+            params={"key": api_key},
+            json={"contents": [{"parts": [{"text": "Reply OK only."}]}], "generationConfig": {"maxOutputTokens": 4, "temperature": 0}},
+            timeout=30,
+            verify=SSL_VERIFY,
+        )
+        status = status_for_health_response(response)
+        message = response_error_message(response) if status != "working" else "Gemini generateContent endpoint responded."
+        return api_health_result(service, True, status, response.status_code, "", message)
+    except Exception as exc:
+        return api_health_result(service, True, "error", message=health_request_error(exc))
+
+
+def check_openai_health(api_key: str = "", model: str = "gpt-4o-mini") -> dict[str, Any]:
+    service = "OpenAI"
+    if not api_key:
+        return api_health_result(service, False, "missing_key", message="No OpenAI key is loaded.")
+    try:
+        client = get_llm_client(api_key)
+        _models = client.models.list()
+        return api_health_result(service, True, "working", "", "", f"OpenAI key responded; configured model is {model}.")
+    except Exception as exc:
+        message = sanitize_api_health_message(getattr(exc, "message", "") or exc.__class__.__name__)
+        lowered = message.lower()
+        status = "bad_key" if "auth" in lowered or "api key" in lowered or "401" in lowered or "403" in lowered else "error"
+        if "rate" in lowered or "429" in lowered:
+            status = "rate_limited"
+        return api_health_result(service, True, status, "", "", message)
+
+
+def check_sapling_health(api_key: str = "") -> dict[str, Any]:
+    service = "Sapling"
+    if not api_key:
+        return api_health_result(service, False, "missing_key", message="No Sapling key is loaded.")
+    try:
+        response = requests.post(
+            SAPLING_AIDETECT_URL,
+            json={"key": api_key, "text": "This is a short academic prose quality check.", "sent_scores": False},
+            timeout=30,
+            verify=SSL_VERIFY,
+        )
+        status = status_for_health_response(response)
+        message = response_error_message(response) if status != "working" else "Sapling AI detector endpoint responded."
+        return api_health_result(service, True, status, response.status_code, "", message)
+    except Exception as exc:
+        return api_health_result(service, True, "error", message=health_request_error(exc))
+
+
+def run_api_health_checks(keys_and_models: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        check_openai_health(keys_and_models.get("openai_key", ""), keys_and_models.get("model", "gpt-4o-mini")),
+        check_serpapi_health(keys_and_models.get("serpapi_key", "")),
+        check_searchapi_health(keys_and_models.get("searchapi_key", "")),
+        check_apify_health(keys_and_models.get("apify_token", ""), keys_and_models.get("apify_actor", DEFAULT_APIFY_GOOGLE_SCHOLAR_ACTOR)),
+        check_semantic_scholar_health(keys_and_models.get("semantic_key", "")),
+        check_core_health(keys_and_models.get("core_key", "")),
+        check_perplexity_health(keys_and_models.get("perplexity_key", ""), keys_and_models.get("perplexity_model", DEFAULT_PERPLEXITY_MODEL)),
+        check_gemini_health(keys_and_models.get("gemini_key", ""), keys_and_models.get("gemini_model", DEFAULT_GEMINI_MODEL)),
+        check_sapling_health(keys_and_models.get("sapling_key", "")),
+    ]
 
 
 def chat_text(
@@ -2529,6 +2828,349 @@ def search_serpapi_thesis_layer(query: str, api_key: str, limit: int = 8) -> lis
     return papers
 
 
+def searchapi_pdf_urls_from_item(item: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    resources = []
+    if isinstance(item.get("resource"), dict):
+        resources.append(item.get("resource") or {})
+    resources.extend([r for r in item.get("resources", []) or [] if isinstance(r, dict)])
+    for resource in resources:
+        link = resource.get("link") or resource.get("url")
+        file_format = str(resource.get("file_format") or resource.get("type") or "").lower()
+        if link and ("pdf" in file_format or str(link).lower().split("?", 1)[0].endswith(".pdf")):
+            urls.append(str(link))
+    link = item.get("pdf_url") or item.get("pdfLink") or item.get("documentLink")
+    if link and str(link).lower().split("?", 1)[0].endswith(".pdf"):
+        urls.append(str(link))
+    return list(dict.fromkeys(urls))
+
+
+def searchapi_author_names(item: dict[str, Any], summary: str = "") -> list[str]:
+    authors = item.get("authors") or []
+    names: list[str] = []
+    if isinstance(authors, list):
+        for author in authors:
+            if isinstance(author, dict) and author.get("name"):
+                names.append(str(author.get("name")).strip())
+            elif isinstance(author, str):
+                names.append(author.strip())
+    elif isinstance(authors, str):
+        names.extend(parse_author_summary(authors))
+    if not names:
+        names = parse_author_summary(summary)
+    return [name for name in names if name]
+
+
+def search_searchapi_google_scholar(
+    query: str,
+    api_key: str,
+    limit: int = 10,
+    extra_params: dict[str, Any] | None = None,
+    source_label: str = "SearchApi Google Scholar",
+    category_hint: str = "",
+) -> list[dict[str, Any]]:
+    if not api_key:
+        return []
+    params: dict[str, Any] = {
+        "engine": "google_scholar",
+        "q": query,
+        "api_key": api_key,
+        "num": max(1, min(int(limit or 10), 20)),
+    }
+    if extra_params:
+        params.update({key: value for key, value in extra_params.items() if value not in ("", None)})
+    response = requests.get(SEARCHAPI_SEARCH_URL, params=params, timeout=30, verify=SSL_VERIFY)
+    response.raise_for_status()
+    data = response.json()
+    papers = []
+    for index, item in enumerate(data.get("organic_results", [])[:limit], start=1):
+        publication_info = item.get("publication_info") or {}
+        publication = (
+            item.get("publication")
+            or item.get("publication_info_summary")
+            or publication_info.get("summary")
+            or item.get("displayed_link")
+            or ""
+        )
+        year = coerce_year(item.get("year") or publication)
+        cited_by = (
+            (((item.get("inline_links") or {}).get("cited_by") or {}).get("total"))
+            or item.get("cited_by")
+            or item.get("citations")
+            or 0
+        )
+        pdf_urls = searchapi_pdf_urls_from_item(item)
+        title = item.get("title") or ""
+        papers.append(
+            {
+                "paper_id": f"searchapi-scholar-{normalize_title(title)[:80]}-{index}",
+                "title": title,
+                "authors": searchapi_author_names(item, publication),
+                "year": year,
+                "abstract": item.get("snippet") or item.get("description") or "",
+                "venue": publication,
+                "url": item.get("link") or "",
+                "citation_count": cited_by or 0,
+                "source": source_label,
+                "query": query,
+                "external_ids": {},
+                "pdf_url": pdf_urls[0] if pdf_urls else "",
+                "pdf_urls": pdf_urls,
+                "cluster_id": item.get("cluster_id") or publication_info.get("cites_id") or "",
+                "category": category_hint or infer_paper_category(title=title, source=source_label),
+            }
+        )
+    return papers
+
+
+def search_searchapi_google_layer(
+    query: str,
+    api_key: str,
+    limit: int = 8,
+    source_label: str = "SearchApi Google Search",
+    category_hint: str = "Research Article",
+) -> list[dict[str, Any]]:
+    if not api_key:
+        return []
+    response = requests.get(
+        SEARCHAPI_SEARCH_URL,
+        params={
+            "engine": "google",
+            "q": query,
+            "api_key": api_key,
+            "num": max(1, min(int(limit or 8), 20)),
+        },
+        timeout=30,
+        verify=SSL_VERIFY,
+    )
+    response.raise_for_status()
+    data = response.json()
+    papers = []
+    for index, item in enumerate(data.get("organic_results", [])[:limit], start=1):
+        title = item.get("title") or ""
+        link = item.get("link") or ""
+        pdf_urls = searchapi_pdf_urls_from_item(item)
+        if not pdf_urls and str(link).lower().split("?", 1)[0].endswith(".pdf"):
+            pdf_urls = [link]
+        papers.append(
+            {
+                "paper_id": f"searchapi-google-{normalize_title(title)[:80]}-{index}",
+                "title": title,
+                "authors": [],
+                "year": coerce_year(item.get("date") or item.get("snippet") or item.get("displayed_link")),
+                "abstract": item.get("snippet") or item.get("description") or "",
+                "venue": item.get("displayed_link") or "",
+                "url": link,
+                "citation_count": 0,
+                "source": source_label,
+                "query": query,
+                "external_ids": {},
+                "pdf_url": pdf_urls[0] if pdf_urls else "",
+                "pdf_urls": pdf_urls,
+                "category": category_hint or infer_paper_category(title=title, source=source_label),
+            }
+        )
+    return papers
+
+
+def search_searchapi_pdf_layer(query: str, api_key: str, limit: int = 8) -> list[dict[str, Any]]:
+    if not api_key:
+        return []
+    pdf_query = query if "filetype:pdf" in query.lower() else f"{query} research paper filetype:pdf"
+    return search_searchapi_google_layer(
+        pdf_query,
+        api_key,
+        limit=limit,
+        source_label="SearchApi Google PDF Search",
+        category_hint="Research Article",
+    )
+
+
+def search_searchapi_review_layer(query: str, api_key: str, limit: int = 8) -> list[dict[str, Any]]:
+    if not api_key:
+        return []
+    review_query = query if "review" in query.lower() else f'{query} review "state of the art"'
+    papers = search_searchapi_google_scholar(
+        review_query,
+        api_key,
+        limit=limit,
+        extra_params={"as_rr": "1"},
+        source_label="SearchApi Review Scholar",
+        category_hint="Review Paper",
+    )
+    for paper in papers:
+        paper["category"] = "Review Paper"
+    return papers
+
+
+def search_searchapi_thesis_layer(query: str, api_key: str, limit: int = 8) -> list[dict[str, Any]]:
+    if not api_key:
+        return []
+    thesis_query = (
+        query
+        if any(token in query.lower() for token in ["thesis", "dissertation", "shodhganga"])
+        else f"{query} thesis dissertation pdf KrishiKosh Shodhganga repository"
+    )
+    papers = search_searchapi_google_layer(
+        thesis_query,
+        api_key,
+        limit=limit,
+        source_label="SearchApi Thesis Search",
+        category_hint="Thesis",
+    )
+    for paper in papers:
+        paper["category"] = "Thesis"
+    return papers
+
+
+def search_searchapi_krishikosh_layer(query: str, api_key: str, limit: int = 8) -> list[dict[str, Any]]:
+    if not api_key:
+        return []
+    full_query = query if "site:krishikosh" in query.lower() else f"{query} site:krishikosh.egranth.ac.in"
+    papers = search_searchapi_google_layer(
+        full_query,
+        api_key,
+        limit=limit,
+        source_label="SearchApi KrishiKosh Thesis",
+        category_hint="Thesis",
+    )
+    for paper in papers:
+        paper["venue"] = paper.get("venue") or "KrishiKosh"
+        paper["category"] = "Thesis"
+    return papers
+
+
+def search_searchapi_researchgate_layer(
+    query: str,
+    api_key: str,
+    limit: int = 8,
+    category_hint: str = "Research Article",
+) -> list[dict[str, Any]]:
+    if not api_key:
+        return []
+    rg_query = query if "researchgate.net" in query.lower() else f"{query} site:researchgate.net/publication"
+    papers = search_searchapi_google_layer(
+        rg_query,
+        api_key,
+        limit=limit,
+        source_label="SearchApi ResearchGate",
+        category_hint=category_hint,
+    )
+    for paper in papers:
+        paper["source"] = f"SearchApi ResearchGate {category_hint}".strip()
+        paper["category"] = category_hint
+        if "researchgate.net" in str(paper.get("url") or "").lower():
+            metadata = extract_researchgate_metadata(paper.get("url", ""))
+            for key, value in metadata.items():
+                if value and not paper.get(key):
+                    paper[key] = value
+    return papers
+
+
+def normalize_apify_actor_id(actor_id: str) -> str:
+    actor = (actor_id or DEFAULT_APIFY_GOOGLE_SCHOLAR_ACTOR).strip()
+    return actor.replace("/", "~")
+
+
+def parse_apify_authors(value: Any) -> list[str]:
+    if isinstance(value, list):
+        names = []
+        for author in value:
+            if isinstance(author, dict) and author.get("name"):
+                names.append(str(author["name"]).strip())
+            elif isinstance(author, str):
+                names.append(author.strip())
+        return [name for name in names if name]
+    if isinstance(value, str):
+        cleaned = re.sub(r"\s+", " ", value).strip()
+        if not cleaned:
+            return []
+        return [part.strip() for part in re.split(r"\s*,\s*|\s+;\s+", cleaned) if part.strip()]
+    return []
+
+
+def apify_candidate_pdf_urls(item: dict[str, Any]) -> list[str]:
+    urls = []
+    for key in ["pdf_url", "pdfUrl", "documentLink", "documentUrl", "fileUrl", "downloadUrl"]:
+        value = item.get(key)
+        if value and str(value).lower().split("?", 1)[0].endswith(".pdf"):
+            urls.append(str(value))
+    for key in ["resources", "links", "documents"]:
+        for resource in item.get(key, []) or []:
+            if isinstance(resource, dict):
+                link = resource.get("link") or resource.get("url")
+                label = str(resource.get("type") or resource.get("file_format") or resource.get("title") or "").lower()
+                if link and ("pdf" in label or str(link).lower().split("?", 1)[0].endswith(".pdf")):
+                    urls.append(str(link))
+    return list(dict.fromkeys(urls))
+
+
+def search_apify_google_scholar(
+    query: str,
+    api_token: str,
+    actor_id: str = DEFAULT_APIFY_GOOGLE_SCHOLAR_ACTOR,
+    limit: int = 10,
+    category_hint: str = "Research Article",
+) -> list[dict[str, Any]]:
+    if not api_token:
+        return []
+    normalized_actor = normalize_apify_actor_id(actor_id)
+    endpoint = f"https://api.apify.com/v2/acts/{quote(normalized_actor, safe='~')}/run-sync-get-dataset-items"
+    payload = {
+        "keyword": query,
+        "query": query,
+        "queries": [query],
+        "maxItems": max(1, int(limit or 10)),
+        "maxResults": max(1, int(limit or 10)),
+        "resultsLimit": max(1, int(limit or 10)),
+        "sortBy": "relevance",
+        "proxyOptions": {"useApifyProxy": True},
+    }
+    response = requests.post(
+        endpoint,
+        params={"token": api_token, "clean": "true", "timeout": 120},
+        json=payload,
+        timeout=150,
+        verify=SSL_VERIFY,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, dict):
+        items = data.get("items") or data.get("results") or data.get("organic_results") or []
+    else:
+        items = data if isinstance(data, list) else []
+    papers = []
+    for index, item in enumerate(items[:limit], start=1):
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("name") or item.get("paperTitle") or ""
+        link = item.get("link") or item.get("url") or item.get("articleUrl") or item.get("resultUrl") or ""
+        publication = item.get("publication") or item.get("venue") or item.get("journal") or item.get("displayedLink") or ""
+        cited_by = item.get("citedBy") or item.get("cited_by") or item.get("citations") or item.get("citation_count") or 0
+        pdf_urls = apify_candidate_pdf_urls(item)
+        if not pdf_urls and str(link).lower().split("?", 1)[0].endswith(".pdf"):
+            pdf_urls = [link]
+        papers.append(
+            {
+                "paper_id": f"apify-scholar-{normalize_title(title)[:80]}-{index}",
+                "title": title,
+                "authors": parse_apify_authors(item.get("authors") or item.get("author") or item.get("authorsList")),
+                "year": coerce_year(item.get("year") or item.get("publicationYear") or publication),
+                "abstract": item.get("snippet") or item.get("abstract") or item.get("description") or "",
+                "venue": publication,
+                "url": link,
+                "citation_count": cited_by or 0,
+                "source": f"Apify Google Scholar ({normalized_actor})",
+                "query": query,
+                "external_ids": {"DOI": item.get("doi")} if item.get("doi") else {},
+                "pdf_url": pdf_urls[0] if pdf_urls else "",
+                "pdf_urls": pdf_urls,
+                "category": category_hint or infer_paper_category(title=title, source="Apify Google Scholar"),
+            }
+        )
+    return papers
+
+
 def extract_researchgate_metadata(url: str) -> dict[str, Any]:
     if not url or "researchgate.net" not in url.lower():
         return {}
@@ -2995,6 +3637,7 @@ def resolve_perplexity_pdf_clues(
     papers: list[dict[str, Any]],
     semantic_key: str = "",
     serpapi_key: str = "",
+    searchapi_key: str = "",
     core_key: str = "",
     max_items: int = 35,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -3060,6 +3703,29 @@ def resolve_perplexity_pdf_clues(
                     [
                         ("KrishiKosh thesis resolver", lambda: search_krishikosh_layer(exact_query, serpapi_key, limit=3)),
                         ("Thesis repository resolver", lambda: search_serpapi_thesis_layer(exact_query, serpapi_key, limit=3)),
+                    ]
+                )
+        if searchapi_key:
+            engine_calls.extend(
+                [
+                    ("SearchApi Scholar title resolver", lambda: search_searchapi_google_scholar(exact_query, searchapi_key, limit=3)),
+                    ("SearchApi PDF title resolver", lambda: search_searchapi_pdf_layer(exact_query, searchapi_key, limit=3)),
+                    (
+                        "SearchApi ResearchGate title resolver",
+                        lambda: search_searchapi_researchgate_layer(
+                            exact_query,
+                            searchapi_key,
+                            limit=2,
+                            category_hint=item.get("category") or infer_paper_category(item),
+                        ),
+                    ),
+                ]
+            )
+            if item.get("category") == "Thesis":
+                engine_calls.extend(
+                    [
+                        ("SearchApi KrishiKosh thesis resolver", lambda: search_searchapi_krishikosh_layer(exact_query, searchapi_key, limit=3)),
+                        ("SearchApi thesis repository resolver", lambda: search_searchapi_thesis_layer(exact_query, searchapi_key, limit=3)),
                     ]
                 )
 
@@ -3629,7 +4295,10 @@ def score_paper_components(
 
     citations = int(paper.get("citation_count") or 0)
     citation_score = min(10, math.log1p(citations) * 2.5)
-    source_score = 5 if any(src in str(paper.get("source", "")) for src in ["Semantic Scholar", "CORE", "OpenAlex", "Google Scholar", "Perplexity", "ResearchGate"]) else 2
+    source_score = 5 if any(
+        src in str(paper.get("source", ""))
+        for src in ["Semantic Scholar", "CORE", "OpenAlex", "Google Scholar", "Perplexity", "ResearchGate", "SearchApi", "Apify"]
+    ) else 2
     pdf_score, pdf_reason = rank_pdf_score(paper)
     doi_score = 2 if doi_from_paper(paper) else 0
     style_score, style_reason, style_matches = style_evidence_score_for_paper(
@@ -4071,6 +4740,51 @@ and outcome; then add review, thesis, KrishiKosh, or dissertation modifiers.
         return fallback
 
 
+def normalize_search_provider_mode(mode: str) -> str:
+    value = (mode or DEFAULT_SEARCH_PROVIDER_MODE).strip()
+    allowed = {
+        "Quota-aware fallback",
+        "Use all providers for deep search",
+        "SerpAPI only",
+        "SearchApi only",
+        "Apify deep fallback only",
+    }
+    return value if value in allowed else DEFAULT_SEARCH_PROVIDER_MODE
+
+
+def init_provider_stats() -> dict[str, dict[str, Any]]:
+    return {
+        "Semantic Scholar": {"queries": 0, "results": 0, "errors": 0, "notes": []},
+        "OpenAlex": {"queries": 0, "results": 0, "errors": 0, "notes": []},
+        "SerpAPI": {"queries": 0, "results": 0, "errors": 0, "notes": []},
+        "SearchApi": {"queries": 0, "results": 0, "errors": 0, "notes": []},
+        "CORE": {"queries": 0, "results": 0, "errors": 0, "notes": []},
+        "Perplexity": {"queries": 0, "results": 0, "errors": 0, "notes": []},
+        "Apify": {"queries": 0, "results": 0, "errors": 0, "notes": []},
+    }
+
+
+def record_provider_result(
+    provider_stats: dict[str, dict[str, Any]],
+    provider: str,
+    count: int = 0,
+    error: str = "",
+    note: str = "",
+) -> None:
+    bucket = provider_stats.setdefault(provider, {"queries": 0, "results": 0, "errors": 0, "notes": []})
+    bucket["queries"] = int(bucket.get("queries", 0) or 0) + 1
+    bucket["results"] = int(bucket.get("results", 0) or 0) + max(0, int(count or 0))
+    if error:
+        bucket["errors"] = int(bucket.get("errors", 0) or 0) + 1
+        notes = bucket.setdefault("notes", [])
+        if len(notes) < 8:
+            notes.append(error)
+    elif note:
+        notes = bucket.setdefault("notes", [])
+        if len(notes) < 8:
+            notes.append(note)
+
+
 def search_and_rank_papers(
     queries: list[str],
     context_text: str,
@@ -4079,6 +4793,10 @@ def search_and_rank_papers(
     core_key: str = "",
     perplexity_key: str = "",
     perplexity_model: str = DEFAULT_PERPLEXITY_MODEL,
+    searchapi_key: str = "",
+    apify_token: str = "",
+    apify_actor: str = DEFAULT_APIFY_GOOGLE_SCHOLAR_ACTOR,
+    search_provider_mode: str = DEFAULT_SEARCH_PROVIDER_MODE,
     openai_key: str = "",
     model: str = "gpt-4o-mini",
     reference_count: int = MIN_REFERENCE_COUNT,
@@ -4088,92 +4806,210 @@ def search_and_rank_papers(
 ) -> dict[str, Any]:
     warnings: list[str] = []
     all_papers: list[dict[str, Any]] = []
+    provider_stats = init_provider_stats()
+    search_provider_mode = normalize_search_provider_mode(search_provider_mode)
+    use_serpapi = bool(serpapi_key) and search_provider_mode not in {"SearchApi only", "Apify deep fallback only"}
+    use_searchapi_direct = bool(searchapi_key) and search_provider_mode in {"SearchApi only", "Use all providers for deep search"}
+    use_searchapi_fallback = bool(searchapi_key) and search_provider_mode == "Quota-aware fallback"
+    use_apify_direct = bool(apify_token) and search_provider_mode in {"Use all providers for deep search", "Apify deep fallback only"}
+    use_apify_fallback = bool(apify_token) and search_provider_mode == "Quota-aware fallback"
+
+    if search_provider_mode == "SerpAPI only" and not serpapi_key:
+        warnings.append("SerpAPI only mode was selected, but no SerpAPI key is loaded.")
+    if search_provider_mode == "SearchApi only" and not searchapi_key:
+        warnings.append("SearchApi only mode was selected, but no SearchApi key is loaded.")
+    if search_provider_mode == "Apify deep fallback only" and not apify_token:
+        warnings.append("Apify deep fallback only mode was selected, but no Apify token is loaded.")
     for query_index, query in enumerate(queries):
         try:
-            all_papers.extend(search_semantic_scholar(query, semantic_key, per_query_limit))
+            results = search_semantic_scholar(query, semantic_key, per_query_limit)
+            all_papers.extend(results)
+            record_provider_result(provider_stats, "Semantic Scholar", len(results))
         except Exception as exc:
             warnings.append(f"Semantic Scholar failed for '{query}': {exc}")
+            record_provider_result(provider_stats, "Semantic Scholar", 0, error=str(exc))
         try:
-            all_papers.extend(search_openalex(query, per_query_limit))
+            results = search_openalex(query, per_query_limit)
+            all_papers.extend(results)
+            record_provider_result(provider_stats, "OpenAlex", len(results))
         except Exception as exc:
             warnings.append(f"OpenAlex failed for '{query}': {exc}")
-        if serpapi_key:
+            record_provider_result(provider_stats, "OpenAlex", 0, error=str(exc))
+
+        serpapi_added = 0
+        if use_serpapi:
             try:
-                all_papers.extend(search_serpapi_google_scholar(query, serpapi_key, per_query_limit))
+                results = search_serpapi_google_scholar(query, serpapi_key, per_query_limit)
+                all_papers.extend(results)
+                serpapi_added += len(results)
+                record_provider_result(provider_stats, "SerpAPI", len(results))
             except Exception as exc:
                 warnings.append(f"SerpAPI Scholar failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
             try:
-                all_papers.extend(search_serpapi_pdf_layer(query, serpapi_key, max(4, per_query_limit // 2)))
+                results = search_serpapi_pdf_layer(query, serpapi_key, max(4, per_query_limit // 2))
+                all_papers.extend(results)
+                serpapi_added += len(results)
+                record_provider_result(provider_stats, "SerpAPI", len(results))
             except Exception as exc:
                 warnings.append(f"Google PDF layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
             try:
-                all_papers.extend(search_serpapi_review_layer(query, serpapi_key, max(3, per_query_limit // 2)))
+                results = search_serpapi_review_layer(query, serpapi_key, max(3, per_query_limit // 2))
+                all_papers.extend(results)
+                serpapi_added += len(results)
+                record_provider_result(provider_stats, "SerpAPI", len(results))
             except Exception as exc:
                 warnings.append(f"Review layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
             try:
-                all_papers.extend(search_researchgate_layer(query, serpapi_key, max(4, per_query_limit // 2), "Research Article"))
+                results = search_researchgate_layer(query, serpapi_key, max(4, per_query_limit // 2), "Research Article")
+                all_papers.extend(results)
+                serpapi_added += len(results)
+                record_provider_result(provider_stats, "SerpAPI", len(results))
             except Exception as exc:
                 warnings.append(f"ResearchGate research layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
             try:
-                all_papers.extend(search_researchgate_layer(query, serpapi_key, max(3, per_query_limit // 2), "Review Paper"))
+                results = search_researchgate_layer(query, serpapi_key, max(3, per_query_limit // 2), "Review Paper")
+                all_papers.extend(results)
+                serpapi_added += len(results)
+                record_provider_result(provider_stats, "SerpAPI", len(results))
             except Exception as exc:
                 warnings.append(f"ResearchGate review layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
             if query_index < 3:
                 try:
-                    all_papers.extend(search_krishikosh_layer(query, serpapi_key, max(3, per_query_limit // 2)))
+                    results = search_krishikosh_layer(query, serpapi_key, max(3, per_query_limit // 2))
+                    all_papers.extend(results)
+                    serpapi_added += len(results)
+                    record_provider_result(provider_stats, "SerpAPI", len(results))
                 except Exception as exc:
                     warnings.append(f"KrishiKosh layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
                 try:
-                    all_papers.extend(search_serpapi_thesis_layer(query, serpapi_key, max(4, per_query_limit // 2)))
+                    results = search_serpapi_thesis_layer(query, serpapi_key, max(4, per_query_limit // 2))
+                    all_papers.extend(results)
+                    serpapi_added += len(results)
+                    record_provider_result(provider_stats, "SerpAPI", len(results))
                 except Exception as exc:
                     warnings.append(f"Thesis repository layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
+
+        searchapi_needed = use_searchapi_direct or (use_searchapi_fallback and serpapi_added < max(3, per_query_limit // 3))
+        if searchapi_needed:
+            try:
+                results = search_searchapi_google_scholar(query, searchapi_key, per_query_limit)
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "SearchApi", len(results))
+            except Exception as exc:
+                warnings.append(f"SearchApi Scholar failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+            try:
+                results = search_searchapi_pdf_layer(query, searchapi_key, max(4, per_query_limit // 2))
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "SearchApi", len(results))
+            except Exception as exc:
+                warnings.append(f"SearchApi PDF layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+            try:
+                results = search_searchapi_review_layer(query, searchapi_key, max(3, per_query_limit // 2))
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "SearchApi", len(results))
+            except Exception as exc:
+                warnings.append(f"SearchApi review layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+            try:
+                results = search_searchapi_researchgate_layer(query, searchapi_key, max(3, per_query_limit // 2), "Research Article")
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "SearchApi", len(results))
+            except Exception as exc:
+                warnings.append(f"SearchApi ResearchGate research layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+            if query_index < 3:
+                try:
+                    results = search_searchapi_krishikosh_layer(query, searchapi_key, max(3, per_query_limit // 2))
+                    all_papers.extend(results)
+                    record_provider_result(provider_stats, "SearchApi", len(results))
+                except Exception as exc:
+                    warnings.append(f"SearchApi KrishiKosh layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+                try:
+                    results = search_searchapi_thesis_layer(query, searchapi_key, max(4, per_query_limit // 2))
+                    all_papers.extend(results)
+                    record_provider_result(provider_stats, "SearchApi", len(results))
+                except Exception as exc:
+                    warnings.append(f"SearchApi thesis layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+
+        if use_apify_direct and query_index < 2:
+            try:
+                results = search_apify_google_scholar(
+                    query,
+                    apify_token,
+                    actor_id=apify_actor,
+                    limit=max(3, per_query_limit // 2),
+                    category_hint="Research Article",
+                )
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "Apify", len(results))
+            except Exception as exc:
+                warnings.append(f"Apify Google Scholar failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "Apify", 0, error=str(exc))
+
         if core_key:
             try:
-                all_papers.extend(search_core(query, core_key, per_query_limit))
+                results = search_core(query, core_key, per_query_limit)
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "CORE", len(results))
             except Exception as exc:
                 warnings.append(f"CORE failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "CORE", 0, error=str(exc))
         if perplexity_key:
             try:
-                all_papers.extend(
-                    search_perplexity_sonar(
-                        query,
+                results = search_perplexity_sonar(
+                    query,
+                    perplexity_key,
+                    perplexity_model,
+                    context_text,
+                    max(4, per_query_limit // 2),
+                    category_hint="Research Article",
+                )
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "Perplexity", len(results))
+            except Exception as exc:
+                warnings.append(f"Perplexity research search failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "Perplexity", 0, error=str(exc))
+            if query_index < 4:
+                try:
+                    results = search_perplexity_sonar(
+                        f"{query} review paper",
                         perplexity_key,
                         perplexity_model,
                         context_text,
-                        max(4, per_query_limit // 2),
-                        category_hint="Research Article",
+                        max(3, per_query_limit // 2),
+                        category_hint="Review Paper",
                     )
-                )
-            except Exception as exc:
-                warnings.append(f"Perplexity research search failed for '{query}': {exc}")
-            if query_index < 4:
-                try:
-                    all_papers.extend(
-                        search_perplexity_sonar(
-                            f"{query} review paper",
-                            perplexity_key,
-                            perplexity_model,
-                            context_text,
-                            max(3, per_query_limit // 2),
-                            category_hint="Review Paper",
-                        )
-                    )
+                    all_papers.extend(results)
+                    record_provider_result(provider_stats, "Perplexity", len(results))
                 except Exception as exc:
                     warnings.append(f"Perplexity review search failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "Perplexity", 0, error=str(exc))
             if query_index < 3:
                 try:
-                    all_papers.extend(
-                        search_perplexity_sonar(
-                            f"{query} thesis dissertation",
-                            perplexity_key,
-                            perplexity_model,
-                            context_text,
-                            max(3, per_query_limit // 2),
-                            category_hint="Thesis",
-                        )
+                    results = search_perplexity_sonar(
+                        f"{query} thesis dissertation",
+                        perplexity_key,
+                        perplexity_model,
+                        context_text,
+                        max(3, per_query_limit // 2),
+                        category_hint="Thesis",
                     )
+                    all_papers.extend(results)
+                    record_provider_result(provider_stats, "Perplexity", len(results))
                 except Exception as exc:
                     warnings.append(f"Perplexity thesis search failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "Perplexity", 0, error=str(exc))
 
     deep_queries = build_agri_deep_search_queries(
         queries,
@@ -4186,73 +5022,175 @@ def search_and_rank_papers(
     )
     for query in deep_queries.get("journal_queries", []):
         try:
-            all_papers.extend(search_semantic_scholar(query, semantic_key, max(5, per_query_limit)))
+            results = search_semantic_scholar(query, semantic_key, max(5, per_query_limit))
+            all_papers.extend(results)
+            record_provider_result(provider_stats, "Semantic Scholar", len(results))
         except Exception as exc:
             warnings.append(f"Deep Semantic Scholar layer failed for '{query}': {exc}")
+            record_provider_result(provider_stats, "Semantic Scholar", 0, error=str(exc))
         try:
-            all_papers.extend(search_openalex(query, max(5, per_query_limit)))
+            results = search_openalex(query, max(5, per_query_limit))
+            all_papers.extend(results)
+            record_provider_result(provider_stats, "OpenAlex", len(results))
         except Exception as exc:
             warnings.append(f"Deep OpenAlex layer failed for '{query}': {exc}")
-        if serpapi_key:
+            record_provider_result(provider_stats, "OpenAlex", 0, error=str(exc))
+        serpapi_deep_added = 0
+        if use_serpapi:
             try:
-                all_papers.extend(search_serpapi_google_scholar(query, serpapi_key, max(5, per_query_limit)))
+                results = search_serpapi_google_scholar(query, serpapi_key, max(5, per_query_limit))
+                all_papers.extend(results)
+                serpapi_deep_added += len(results)
+                record_provider_result(provider_stats, "SerpAPI", len(results))
             except Exception as exc:
                 warnings.append(f"Deep Google Scholar layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
+        if use_searchapi_direct or (use_searchapi_fallback and serpapi_deep_added < max(3, per_query_limit // 3)):
+            try:
+                results = search_searchapi_google_scholar(query, searchapi_key, max(5, per_query_limit))
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "SearchApi", len(results))
+            except Exception as exc:
+                warnings.append(f"Deep SearchApi Scholar layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
 
-    if serpapi_key:
+    if use_serpapi or use_searchapi_direct or use_searchapi_fallback:
         for query in deep_queries.get("thesis_queries", []):
-            try:
-                all_papers.extend(search_krishikosh_layer(query, serpapi_key, max(4, per_query_limit // 2)))
-            except Exception as exc:
-                warnings.append(f"Deep KrishiKosh thesis layer failed for '{query}': {exc}")
-            try:
-                all_papers.extend(search_serpapi_thesis_layer(query, serpapi_key, max(4, per_query_limit // 2)))
-            except Exception as exc:
-                warnings.append(f"Deep thesis repository layer failed for '{query}': {exc}")
+            serpapi_deep_added = 0
+            if use_serpapi:
+                try:
+                    results = search_krishikosh_layer(query, serpapi_key, max(4, per_query_limit // 2))
+                    all_papers.extend(results)
+                    serpapi_deep_added += len(results)
+                    record_provider_result(provider_stats, "SerpAPI", len(results))
+                except Exception as exc:
+                    warnings.append(f"Deep KrishiKosh thesis layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
+                try:
+                    results = search_serpapi_thesis_layer(query, serpapi_key, max(4, per_query_limit // 2))
+                    all_papers.extend(results)
+                    serpapi_deep_added += len(results)
+                    record_provider_result(provider_stats, "SerpAPI", len(results))
+                except Exception as exc:
+                    warnings.append(f"Deep thesis repository layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
+            if use_searchapi_direct or (use_searchapi_fallback and serpapi_deep_added < 2):
+                try:
+                    results = search_searchapi_krishikosh_layer(query, searchapi_key, max(4, per_query_limit // 2))
+                    all_papers.extend(results)
+                    record_provider_result(provider_stats, "SearchApi", len(results))
+                except Exception as exc:
+                    warnings.append(f"Deep SearchApi KrishiKosh thesis layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+                try:
+                    results = search_searchapi_thesis_layer(query, searchapi_key, max(4, per_query_limit // 2))
+                    all_papers.extend(results)
+                    record_provider_result(provider_stats, "SearchApi", len(results))
+                except Exception as exc:
+                    warnings.append(f"Deep SearchApi thesis repository layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
         for query in deep_queries.get("review_queries", []):
+            serpapi_deep_added = 0
+            if use_serpapi:
+                try:
+                    results = search_serpapi_review_layer(query, serpapi_key, max(4, per_query_limit // 2))
+                    all_papers.extend(results)
+                    serpapi_deep_added += len(results)
+                    record_provider_result(provider_stats, "SerpAPI", len(results))
+                except Exception as exc:
+                    warnings.append(f"Deep review Scholar layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
+                try:
+                    results = search_researchgate_layer(query, serpapi_key, max(3, per_query_limit // 2), "Review Paper")
+                    all_papers.extend(results)
+                    serpapi_deep_added += len(results)
+                    record_provider_result(provider_stats, "SerpAPI", len(results))
+                except Exception as exc:
+                    warnings.append(f"Deep ResearchGate review layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SerpAPI", 0, error=str(exc))
+            if use_searchapi_direct or (use_searchapi_fallback and serpapi_deep_added < 2):
+                try:
+                    results = search_searchapi_review_layer(query, searchapi_key, max(4, per_query_limit // 2))
+                    all_papers.extend(results)
+                    record_provider_result(provider_stats, "SearchApi", len(results))
+                except Exception as exc:
+                    warnings.append(f"Deep SearchApi review Scholar layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+                try:
+                    results = search_searchapi_researchgate_layer(query, searchapi_key, max(3, per_query_limit // 2), "Review Paper")
+                    all_papers.extend(results)
+                    record_provider_result(provider_stats, "SearchApi", len(results))
+                except Exception as exc:
+                    warnings.append(f"Deep SearchApi ResearchGate review layer failed for '{query}': {exc}")
+                    record_provider_result(provider_stats, "SearchApi", 0, error=str(exc))
+
+    apify_reason = ""
+    if use_apify_direct:
+        apify_reason = "provider mode requested Apify"
+    elif use_apify_fallback:
+        rough_deduped_count = len(deduplicate_papers(all_papers))
+        if rough_deduped_count < max(reference_count, per_query_limit * 2):
+            apify_reason = f"quota-aware fallback saw only {rough_deduped_count} deduped candidates"
+    if apify_reason:
+        warnings.append(f"Apify deep fallback active: {apify_reason}.")
+        apify_jobs: list[tuple[str, str]] = []
+        apify_jobs.extend([(query, "Research Article") for query in deep_queries.get("journal_queries", [])[:2]])
+        apify_jobs.extend([(query, "Review Paper") for query in deep_queries.get("review_queries", [])[:1]])
+        apify_jobs.extend([(query, "Thesis") for query in deep_queries.get("thesis_queries", [])[:1]])
+        if not apify_jobs:
+            apify_jobs.extend([(query, "Research Article") for query in queries[:2]])
+        for query, category_hint in apify_jobs[:4]:
             try:
-                all_papers.extend(search_serpapi_review_layer(query, serpapi_key, max(4, per_query_limit // 2)))
+                results = search_apify_google_scholar(
+                    query,
+                    apify_token,
+                    actor_id=apify_actor,
+                    limit=max(4, per_query_limit // 2),
+                    category_hint=category_hint,
+                )
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "Apify", len(results))
             except Exception as exc:
-                warnings.append(f"Deep review Scholar layer failed for '{query}': {exc}")
-            try:
-                all_papers.extend(search_researchgate_layer(query, serpapi_key, max(3, per_query_limit // 2), "Review Paper"))
-            except Exception as exc:
-                warnings.append(f"Deep ResearchGate review layer failed for '{query}': {exc}")
+                warnings.append(f"Apify deep Scholar layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "Apify", 0, error=str(exc))
 
     if perplexity_key:
         for query in deep_queries.get("review_queries", []):
             try:
-                all_papers.extend(
-                    search_perplexity_sonar(
-                        query,
-                        perplexity_key,
-                        perplexity_model,
-                        context_text,
-                        max(3, per_query_limit // 2),
-                        category_hint="Review Paper",
-                    )
+                results = search_perplexity_sonar(
+                    query,
+                    perplexity_key,
+                    perplexity_model,
+                    context_text,
+                    max(3, per_query_limit // 2),
+                    category_hint="Review Paper",
                 )
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "Perplexity", len(results))
             except Exception as exc:
                 warnings.append(f"Deep Perplexity review layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "Perplexity", 0, error=str(exc))
         for query in deep_queries.get("thesis_queries", []):
             try:
-                all_papers.extend(
-                    search_perplexity_sonar(
-                        query,
-                        perplexity_key,
-                        perplexity_model,
-                        context_text,
-                        max(3, per_query_limit // 2),
-                        category_hint="Thesis",
-                    )
+                results = search_perplexity_sonar(
+                    query,
+                    perplexity_key,
+                    perplexity_model,
+                    context_text,
+                    max(3, per_query_limit // 2),
+                    category_hint="Thesis",
                 )
+                all_papers.extend(results)
+                record_provider_result(provider_stats, "Perplexity", len(results))
             except Exception as exc:
                 warnings.append(f"Deep Perplexity thesis layer failed for '{query}': {exc}")
+                record_provider_result(provider_stats, "Perplexity", 0, error=str(exc))
 
     all_papers, perplexity_pdf_stats = resolve_perplexity_pdf_clues(
         all_papers,
         semantic_key=semantic_key,
         serpapi_key=serpapi_key,
+        searchapi_key=searchapi_key,
         core_key=core_key,
         max_items=max(12, min(45, int(reference_count or MIN_REFERENCE_COUNT) * 3)),
     )
@@ -4290,6 +5228,8 @@ def search_and_rank_papers(
         "selected": selected,
         "warnings": warnings,
         "quota_status": quota_status,
+        "provider_mode": search_provider_mode,
+        "provider_stats": provider_stats,
         "candidate_count": len(all_papers),
         "deduped_count": len(deduped),
     }
@@ -4668,6 +5608,30 @@ def strategy_serpapi_deep_pdf(paper: dict[str, Any], serpapi_key: str = "") -> t
     return None, ""
 
 
+def strategy_searchapi_deep_pdf(paper: dict[str, Any], searchapi_key: str = "") -> tuple[bytes | None, str]:
+    if not searchapi_key or not paper.get("title"):
+        return None, ""
+    try:
+        title_query = f'"{paper["title"]}"'
+        candidates = []
+        candidates.extend(search_searchapi_google_scholar(title_query, searchapi_key, limit=3))
+        candidates.extend(search_searchapi_pdf_layer(title_query, searchapi_key, limit=3))
+        if paper.get("category") == "Thesis":
+            candidates.extend(search_searchapi_krishikosh_layer(title_query, searchapi_key, limit=3))
+            candidates.extend(search_searchapi_thesis_layer(title_query, searchapi_key, limit=3))
+        for candidate in candidates:
+            for pdf_url in [candidate.get("pdf_url"), *(candidate.get("pdf_urls") or [])]:
+                if not pdf_url:
+                    continue
+                pdf = download_pdf_url(str(pdf_url))
+                if pdf:
+                    paper["pdf_url"] = str(pdf_url)
+                    return pdf, "SearchApi Scholar/PDF resource"
+    except Exception:
+        return None, ""
+    return None, ""
+
+
 def strategy_core_pdf(paper: dict[str, Any], core_key: str = "") -> tuple[bytes | None, str]:
     if not core_key:
         return None, ""
@@ -4729,6 +5693,7 @@ def save_reference_pdf(paper: dict[str, Any], pdf_bytes: bytes) -> Path:
 def download_and_read_selected_papers(
     selected_papers: list[dict[str, Any]],
     serpapi_key: str = "",
+    searchapi_key: str = "",
     core_key: str = "",
     semantic_key: str = "",
 ) -> list[dict[str, Any]]:
@@ -4747,6 +5712,7 @@ def download_and_read_selected_papers(
             strategy_researchgate_pdf,
             strategy_krishikosh_pdf,
             lambda item: strategy_serpapi_deep_pdf(item, serpapi_key),
+            lambda item: strategy_searchapi_deep_pdf(item, searchapi_key),
             lambda item: strategy_core_pdf(item, core_key),
             strategy_unpaywall_pdf,
         ]:
@@ -6132,12 +7098,26 @@ def merge_search_results(
     deduped = deduplicate_papers(combined)
     ranked = sorted(deduped, key=lambda item: item.get("score", 0), reverse=True)
     selected, quota_status = select_ranked_papers_with_targets(ranked, reference_count)
+    provider_stats = init_provider_stats()
+    for source in [existing.get("provider_stats") or {}, extra.get("provider_stats") or {}]:
+        for provider, stats in source.items():
+            bucket = provider_stats.setdefault(provider, {"queries": 0, "results": 0, "errors": 0, "notes": []})
+            bucket["queries"] = int(bucket.get("queries", 0) or 0) + int(stats.get("queries", 0) or 0)
+            bucket["results"] = int(bucket.get("results", 0) or 0) + int(stats.get("results", 0) or 0)
+            bucket["errors"] = int(bucket.get("errors", 0) or 0) + int(stats.get("errors", 0) or 0)
+            notes = bucket.setdefault("notes", [])
+            for note in stats.get("notes", []) or []:
+                if note and note not in notes and len(notes) < 8:
+                    notes.append(note)
     return {
         "queries": list(dict.fromkeys((existing.get("queries") or []) + (extra.get("queries") or []))),
+        "deep_queries": extra.get("deep_queries") or existing.get("deep_queries") or {},
         "papers": ranked,
         "selected": selected,
         "warnings": (existing.get("warnings") or []) + (extra.get("warnings") or []),
         "quota_status": quota_status,
+        "provider_mode": extra.get("provider_mode") or existing.get("provider_mode") or DEFAULT_SEARCH_PROVIDER_MODE,
+        "provider_stats": provider_stats,
         "candidate_count": int(existing.get("candidate_count") or 0) + int(extra.get("candidate_count") or 0),
         "deduped_count": len(deduped),
     }
