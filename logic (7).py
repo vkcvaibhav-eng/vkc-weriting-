@@ -3106,6 +3106,89 @@ def reference_metadata_missing(paper: dict[str, Any]) -> list[str]:
     return missing
 
 
+BAD_REFERENCE_MARKERS = [
+    " or similar ",
+    "regional indian",
+    " / regional",
+    " / journal",
+    "journal /",
+    "similar plant protection journal",
+    "researchgate.net",
+    " - researchgate",
+    " - indianjournals.com",
+    " - cabidigitallibrary.org",
+]
+
+
+def looks_like_malformed_author(author: str) -> bool:
+    author = re.sub(r"\s+", " ", str(author or "").strip())
+    if not author:
+        return True
+    cleaned = re.sub(r"[^A-Za-z]", "", author)
+    if len(cleaned) <= 2:
+        return True
+    if re.fullmatch(r"[A-Z](?:\s*[.,]\s*[A-Z]){0,3}[.,]?", author):
+        return True
+    if re.search(r"\d", author):
+        return True
+    return False
+
+
+def looks_like_malformed_reference_title(title: str) -> bool:
+    title = re.sub(r"\s+", " ", str(title or "").strip())
+    if len(title) < 8:
+        return True
+    lower_title = title.lower()
+    if lower_title.startswith(("...", "(pdf)", "pdf ")):
+        return True
+    if "..." in title or "\u2026" in title:
+        return True
+    words = re.findall(r"[A-Za-z]+", title)
+    if len(words) <= 5 and "," in title and re.search(r"\d|[()]", title):
+        return True
+    if len(words) >= 6:
+        one_letter_words = [word for word in words if len(word) == 1 and word.isupper()]
+        if len(one_letter_words) / max(1, len(words)) > 0.35:
+            return True
+    comma_chunks = [chunk.strip() for chunk in title.split(",") if chunk.strip()]
+    if len(comma_chunks) >= 3 and sum(1 for chunk in comma_chunks if len(chunk) <= 4) >= 2:
+        return True
+    return False
+
+
+def selected_reference_quality_issues(paper: dict[str, Any]) -> list[str]:
+    category = paper.get("category") or infer_paper_category(paper)
+    issues: list[str] = []
+    title = str(paper.get("title") or "").strip()
+    authors = paper.get("authors") or []
+    year = paper.get("year")
+    venue = str(paper.get("journal") or paper.get("venue") or "").strip()
+    source = str(paper.get("source") or "").strip()
+    reference_text = " ".join([title, venue, source, str(paper.get("url") or "")]).lower()
+
+    if looks_like_malformed_reference_title(title):
+        issues.append("malformed title")
+    if category != "Thesis":
+        if not authors or all(looks_like_malformed_author(str(author)) for author in authors):
+            issues.append("missing or malformed authors")
+        if not year:
+            issues.append("missing year")
+    if any(marker in f" {reference_text} " for marker in BAD_REFERENCE_MARKERS):
+        issues.append("vague or scraped metadata")
+    if "anonymous" in join_apa_authors(authors).lower() and category != "Thesis":
+        issues.append("anonymous selected source")
+    if category in {"Research Article", "Review Paper"}:
+        has_stable_pointer = bool(doi_from_paper(paper) or paper.get("url") or paper.get("pdf_url") or paper.get("pdf_urls"))
+        has_venue = bool(venue)
+        if not (has_stable_pointer or has_venue):
+            issues.append("no venue, DOI, URL, or PDF clue")
+    return issues
+
+
+def selected_reference_is_citable(paper: dict[str, Any]) -> bool:
+    return not selected_reference_quality_issues(paper)
+
+
 def crossref_author_names(authors: list[dict[str, Any]]) -> list[str]:
     names = []
     for author in authors or []:
@@ -3540,6 +3623,7 @@ def score_paper_components(
         specific_anchor_hits=specific_anchor_hits,
         objective_or_finding_hits=objective_hits + finding_hits,
     )
+    quality_issues = selected_reference_quality_issues(paper)
 
     penalty = 0
     title_query_text = f"{paper.get('title', '')} {paper.get('query', '')} {paper.get('found_query', '')}".lower()
@@ -3553,6 +3637,19 @@ def score_paper_components(
         penalty += 10
     if (focus["specific_anchor_terms"] and specific_anchor_hits == 0 and objective_hits + finding_hits == 0):
         penalty += 18
+    quality_penalty = 0
+    for issue in quality_issues:
+        if issue == "malformed title":
+            quality_penalty += 14
+        elif issue == "missing or malformed authors":
+            quality_penalty += 10
+        elif issue == "vague or scraped metadata":
+            quality_penalty += 12
+        elif issue == "missing year":
+            quality_penalty += 6
+        else:
+            quality_penalty += 5
+    penalty += min(40, quality_penalty)
 
     gemini_score = 0.0
     if include_gemini and paper.get("gemini_note"):
@@ -3611,6 +3708,8 @@ def score_paper_components(
         "year_score": round(year_score, 1),
         "gemini_evidence_score": round(gemini_score, 1),
         "penalty": round(penalty, 1),
+        "reference_quality_issues": quality_issues,
+        "reference_quality_penalty": min(40, quality_penalty),
         "pdf_reason": pdf_reason,
     }
     reason = (
@@ -3618,7 +3717,8 @@ def score_paper_components(
         f"discussion focus {components['discussion_focus_match']}; biology/outcome {components['biology_match']}; "
         f"style fit {components['style_fit_score']} ({components['style_fit_reason']}); "
         f"PDF {pdf_reason}; citations {citations}; year {year_value or 'unknown'}; "
-        f"Gemini evidence {components['gemini_evidence_score']}; penalty {components['penalty']}"
+        f"Gemini evidence {components['gemini_evidence_score']}; penalty {components['penalty']}; "
+        f"reference quality {quality_issues or 'ok'}"
     )
     return score, reason, components
 
@@ -3634,9 +3734,20 @@ def apply_ranking_components(
     paper["score_reason"] = reason
     paper["ranking_stage"] = stage
     paper["ranking_components"] = components
-    for key in ["objective_match", "key_finding_match", "discussion_focus_match", "biology_match", "style_fit_score", "pdf_score", "gemini_evidence_score", "penalty"]:
+    for key in [
+        "objective_match",
+        "key_finding_match",
+        "discussion_focus_match",
+        "biology_match",
+        "style_fit_score",
+        "pdf_score",
+        "gemini_evidence_score",
+        "penalty",
+        "reference_quality_penalty",
+    ]:
         paper[key] = components.get(key, 0)
     paper["style_fit_reason"] = components.get("style_fit_reason", "")
+    paper["reference_quality_issues"] = components.get("reference_quality_issues", [])
     return paper
 
 
@@ -3694,6 +3805,8 @@ def ai_score_papers(
                 "biology_match": paper.get("biology_match", 0),
                 "style_fit_score": paper.get("style_fit_score", 0),
                 "style_fit_reason": paper.get("style_fit_reason", ""),
+                "reference_quality_issues": paper.get("reference_quality_issues", []),
+                "reference_quality_penalty": paper.get("reference_quality_penalty", 0),
                 "pdf_score": paper.get("pdf_score", 0),
                 "score_reason": paper.get("score_reason", ""),
             }
@@ -3720,6 +3833,9 @@ Papers:
 Return JSON array. Each item must have paper_id, ai_score from 0 to 100, category as one of
 "Research Article", "Review Paper", or "Thesis", and reason.
 Do not reward papers whose only match is RBD, CRD, ANOVA, CD, SEm, DMRT, replication, or statistical design.
+Do not rescue records with reference_quality_issues unless the title, authors, year, and venue are clearly usable.
+Penalize vague scraped metadata, malformed author strings, title fragments, placeholder journal names, and records that
+cannot be cited cleanly in APA 7th edition.
 Reward papers that explain treatment efficacy, pest reduction, yield improvement, dose response, biological activity,
 mode of action, crop/pest response, agreement/disagreement with previous results, or practical recommendation.
 Use selected-author style fit only as a tie-breaker after scientific relevance is established. Never rank a paper high
@@ -3744,7 +3860,10 @@ focused findings, crop/pest/treatment, or result direction.
         for paper in papers:
             item = score_map.get(str(paper.get("paper_id")))
             if item:
-                paper["ai_score"] = float(item.get("ai_score") or paper.get("score") or 0)
+                ai_score = float(item.get("ai_score") or paper.get("score") or 0)
+                if paper.get("reference_quality_issues"):
+                    ai_score = min(ai_score, 45.0)
+                paper["ai_score"] = ai_score
                 paper["score_reason"] = item.get("reason") or paper.get("score_reason", "")
                 paper["category"] = item.get("category") or paper.get("category") or infer_paper_category(paper)
                 paper["score"] = round((float(paper.get("score") or 0) * 0.35) + (paper["ai_score"] * 0.65), 1)
@@ -4944,10 +5063,10 @@ def final_references_with_source_mined(papers: list[dict[str, Any]]) -> list[str
 
 def include_in_final_references(paper: dict[str, Any]) -> bool:
     category = paper.get("category") or infer_paper_category(paper)
-    if category != "Thesis":
-        return True
     note = paper.get("gemini_note") or {}
-    return bool(note.get("cite_thesis_directly") or paper.get("cite_thesis_directly"))
+    if category == "Thesis":
+        return bool(note.get("cite_thesis_directly") or paper.get("cite_thesis_directly")) and selected_reference_is_citable(paper)
+    return selected_reference_is_citable(paper)
 
 
 def source_mined_primary_study_search_queries(leads: list[Any], context_text: str = "", limit: int = 12) -> list[str]:
@@ -6259,13 +6378,15 @@ def reference_context(papers: list[dict[str, Any]], limit: int = 16, target_sect
         full_text = paper.get("full_text") or ""
         gemini_note = paper.get("gemini_note") or {}
         category = paper.get("category") or infer_paper_category(paper)
-        direct_citation_allowed = category != "Thesis" or bool(gemini_note.get("cite_thesis_directly"))
+        quality_issues = selected_reference_quality_issues(paper)
+        direct_citation_allowed = include_in_final_references(paper)
         evidence_section = paper_evidence_section(paper)
         rows.append(
             {
-                "citation": citation_key(paper) if direct_citation_allowed else "THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY",
+                "citation": citation_key(paper) if direct_citation_allowed else "UNSAFE_OR_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY",
                 "source_id": citation_key(paper),
                 "direct_citation_allowed": direct_citation_allowed,
+                "reference_quality_issues": quality_issues,
                 "planned_evidence_section": evidence_section,
                 "target_writing_section": target_section or "",
                 "cross_section_use_allowed": (
@@ -6540,6 +6661,74 @@ CONCLUSION_STAT_DETAIL_RE = re.compile(
     flags=re.I,
 )
 
+CONCLUSION_RESULT_VALUE_RE = re.compile(
+    r"(?:approximately|about|around|nearly)?\s*"
+    r"\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*"
+    r"(?:%|per\s*cent|percent|kg\s*/\s*ha|kg\s*ha-?1|q\s*/\s*ha|q\s*ha-?1|"
+    r"t\s*/\s*ha|t\s*ha-?1|tonnes?\s*/\s*ha)(?=\s|[,.;:)]|$)",
+    flags=re.I,
+)
+
+
+def sanitize_generated_section_text(text: str) -> str:
+    """Clean model artifacts that do not belong in a Word manuscript draft."""
+    cleaned = str(text or "")
+    if not cleaned:
+        return ""
+    cleaned = cleaned.replace("\\[", "").replace("\\]", "")
+    cleaned = cleaned.replace("\\(", "").replace("\\)", "")
+    cleaned = re.sub(r"(?:\\text|\bext)\{([^{}]*)\}", r"\1", cleaned)
+    cleaned = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"[(\1) / (\2)]", cleaned)
+    cleaned = cleaned.replace("\\times", "x")
+    cleaned = re.sub(r"\\([A-Za-z]+)", r"\1", cleaned)
+    cleaned = re.sub(r"\b([A-Za-z])_(\d+)\b", r"\1\2", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def split_long_section_into_paragraphs(text: str, max_words: int = 260) -> str:
+    """Split overlong one-block sections into readable manuscript paragraphs."""
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(text or "")) if part.strip()]
+    if not paragraphs:
+        return ""
+
+    transition_re = re.compile(
+        r"^(These findings|This finding|This result|The present|In contrast|Similarly|Moreover|"
+        r"Furthermore|From a practical|Taken together|Overall|However)\b",
+        flags=re.I,
+    )
+    output: list[str] = []
+    for paragraph in paragraphs:
+        words = paragraph.split()
+        if len(words) <= max_words:
+            output.append(paragraph)
+            continue
+        sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z(])", paragraph) if sentence.strip()]
+        if len(sentences) <= 1:
+            output.append(paragraph)
+            continue
+        current: list[str] = []
+        current_words = 0
+        for sentence in sentences:
+            sentence_words = len(sentence.split())
+            should_break = (
+                current
+                and (
+                    current_words + sentence_words > max_words
+                    or (current_words >= int(max_words * 0.55) and transition_re.search(sentence))
+                )
+            )
+            if should_break:
+                output.append(" ".join(current).strip())
+                current = []
+                current_words = 0
+            current.append(sentence)
+            current_words += sentence_words
+        if current:
+            output.append(" ".join(current).strip())
+    return "\n\n".join(output)
+
 
 def remove_conclusion_statistical_details(text: str) -> str:
     """Keep conclusion prose interpretive by removing table-statistic reporting."""
@@ -6563,6 +6752,10 @@ def remove_conclusion_statistical_details(text: str) -> str:
     cleaned = re.sub(r"\bsignificantly\s+", "", cleaned, flags=re.I)
     cleaned = re.sub(r"\bdiffered\s+significantly\b", "differed", cleaned, flags=re.I)
     cleaned = re.sub(r"\bsignificant(?:ly)?\b", "", cleaned, flags=re.I)
+    cleaned = CONCLUSION_RESULT_VALUE_RE.sub("", cleaned)
+    cleaned = re.sub(r"\b(?:equating to|equivalent to|corresponding to)\s*(?=[,.;]|and|$)", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b(?:approximately|about|around|nearly)\s*(?=[,.;])", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b(?:of|by|to)\s*(?=[,.;])", "", cleaned, flags=re.I)
 
     sentence_parts = re.split(r"(?<=[.!?])\s+", cleaned)
     kept_sentences: list[str] = []
@@ -6592,7 +6785,14 @@ def remove_conclusion_statistical_details(text: str) -> str:
 
     cleaned = " ".join(kept_sentences).strip()
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    return cleaned or re.sub(r"\s{2,}", " ", str(text or "")).strip()
+    if cleaned:
+        return cleaned
+    fallback = CONCLUSION_STAT_DETAIL_RE.sub("", str(text or ""))
+    fallback = CONCLUSION_RESULT_VALUE_RE.sub("", fallback)
+    fallback = re.sub(r"\s+([,.;:])", r"\1", fallback)
+    fallback = re.sub(r"([,;:])\s*([.!?])", r"\2", fallback)
+    fallback = re.sub(r"\s{2,}", " ", fallback).strip(" ,;:")
+    return fallback
 
 
 def write_methodology(
@@ -6616,6 +6816,8 @@ Required approach:
 - Include design, location, season/year, treatments, replications, observations, sampling, and statistics only when supplied.
 - Do not invent doses, design, dates, instruments, or statistical tests.
 - Use compact agricultural research-paper paragraphs.
+- Do not use LaTeX, Markdown equation blocks, or escaped math syntax. Write formulas as plain Word-safe text,
+  for example: Percentage yield loss = [(X1 - X2) / X1] x 100.
 
 {common}
 
@@ -6930,6 +7132,8 @@ Rules:
 - Do not invent citations, author names, years, or unsupported mechanisms.
 - Use thesis and review mined bibliography/citation-map entries as citable original references when they are present
   in the reference context with a citation key and reference_entry, even when DOI or link is unavailable.
+- Do not use rows marked UNSAFE_OR_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY as manuscript citations. Use those rows
+  only as evidence-search or source-mining clues.
 - Use looser mined leads as search/interpretation guidance when they do not contain a usable author-year reference entry.
 - Evidence-section labels are planning priorities only. A source may support more than one manuscript section when
   its evidence actually fits the claim being written.
@@ -7026,6 +7230,7 @@ Rules:
   and practical justification than minor table results.
 - Do not write a random or unnecessarily long Discussion. Match depth to the word budget, objective, focused findings,
   number of important treatments/observations, crop/pest complexity, and style guide.
+- Return 3-5 manuscript paragraphs separated by blank lines. Do not return one long paragraph.
 - Evidence-section labels are planning priorities. If an Introduction-planned source also supports a Discussion
   mechanism, comparison, or implication, it may be used here, but the claim must match the evidence.
 - The paragraph order must follow the Discussion framework where possible: finding -> explanation -> validation or contrast
@@ -7038,7 +7243,8 @@ Rules:
 - Do not make RBD, CRD, RCBD, factorial design, pot culture, field trial, laboratory design, replications, ANOVA,
   or software differences the main basis of literature comparison.
 - Prefer Gemini reading notes and downloaded full_text_excerpt evidence where available; use abstracts only when full text was not downloaded/read.
-- Thesis entries marked THESIS_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY are not allowed citations.
+- Rows marked UNSAFE_OR_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY are not allowed manuscript citations.
+- If a selected reference has reference_quality_issues, use it only as a search/evidence lead and do not cite it directly.
 - Use thesis RoL notes to identify the original primary studies behind the thesis wording. Cite those original studies
   when the reference context provides them as source-mined reference entries with citation keys; do not cite the thesis itself.
 - When objective_matched_rol_extracts are available, use them to understand which RoL citations match our objective
@@ -7125,6 +7331,9 @@ Rules:
 - Cite review papers for broad background or synthesis only; cite original selected or source-mined primary papers for
   specific results, methods, and study-to-study comparisons.
 - Cite only selected references and source-mined reference entries provided in the context. Do not invent citations.
+- Do not use rows marked UNSAFE_OR_SOURCE_MINING_ONLY_DO_NOT_CITE_DIRECTLY as manuscript citations. If a selected
+  reference has reference_quality_issues, use it only as a search/evidence lead.
+- Write 2-4 concise manuscript paragraphs separated by blank lines.
 
 {common}
 """
@@ -7273,8 +7482,8 @@ def generate_full_draft(
         f"Figure from {image['name']}:\n{image.get('summary', '')}" for image in images if image.get("summary")
     )
 
-    methodology = write_methodology(api_key, model, common, raw_methodology, styles)
-    results = write_results(api_key, model, common, styles, table_summaries, image_summaries)
+    methodology = sanitize_generated_section_text(write_methodology(api_key, model, common, raw_methodology, styles))
+    results = sanitize_generated_section_text(write_results(api_key, model, common, styles, table_summaries, image_summaries))
     discussion_framework = build_discussion_framework(
         api_key,
         model,
@@ -7286,20 +7495,30 @@ def generate_full_draft(
         claude_key=claude_key,
         claude_model=claude_model,
     )
-    discussion = write_discussion(
-        api_key,
-        model,
-        common,
-        styles,
-        selected_papers,
-        results,
-        discussion_framework,
-        claude_key=claude_key,
-        claude_model=claude_model,
+    discussion = split_long_section_into_paragraphs(
+        sanitize_generated_section_text(
+            write_discussion(
+                api_key,
+                model,
+                common,
+                styles,
+                selected_papers,
+                results,
+                discussion_framework,
+                claude_key=claude_key,
+                claude_model=claude_model,
+            )
+        ),
+        max_words=240,
     )
-    conclusion = write_conclusion(api_key, model, common, styles, results, discussion)
-    introduction = write_introduction(api_key, model, common, styles, selected_papers)
-    abstract = write_abstract(api_key, model, common, styles, methodology, results, conclusion)
+    conclusion = remove_conclusion_statistical_details(
+        sanitize_generated_section_text(write_conclusion(api_key, model, common, styles, results, discussion))
+    )
+    introduction = split_long_section_into_paragraphs(
+        sanitize_generated_section_text(write_introduction(api_key, model, common, styles, selected_papers)),
+        max_words=230,
+    )
+    abstract = sanitize_generated_section_text(write_abstract(api_key, model, common, styles, methodology, results, conclusion))
     source_mined_references = source_mined_reference_leads(selected_papers)
     references = final_references_with_source_mined(selected_papers)
 
@@ -7332,6 +7551,7 @@ def generate_full_draft(
 
 
 def add_paragraphs(document: Any, text: str) -> None:
+    text = split_long_section_into_paragraphs(sanitize_generated_section_text(text or ""), max_words=280)
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text or "") if part.strip()]
     if not paragraphs and text:
         paragraphs = [text.strip()]
