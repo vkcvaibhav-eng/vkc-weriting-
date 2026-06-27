@@ -3222,6 +3222,40 @@ RANKING_RESULT_TERMS = {
 }
 
 
+STYLE_ANCHOR_STOP_TERMS = {
+    "study",
+    "research",
+    "paper",
+    "field",
+    "trial",
+    "result",
+    "results",
+    "effect",
+    "effects",
+    "efficacy",
+    "bioefficacy",
+    "treatment",
+    "treatments",
+    "management",
+    "control",
+    "pest",
+    "pests",
+    "crop",
+    "crops",
+    "host",
+    "hosts",
+    "yield",
+    "population",
+    "reduction",
+    "comparison",
+    "practical",
+    "recommendation",
+    "mode",
+    "action",
+    "mechanism",
+}
+
+
 STYLE_EVIDENCE_DIMENSIONS = {
     "mechanism": {
         "label": "mechanism or mode-of-action support",
@@ -3241,7 +3275,7 @@ STYLE_EVIDENCE_DIMENSIONS = {
     "primary_citation": {
         "label": "original primary citation support",
         "triggers": ["original", "primary", "citation", "bibliography", "reference", "author-year", "cite"],
-        "paper_terms": ["journal", "research article", "experiment", "field trial", "study", "doi", "abstract"],
+        "paper_terms": ["bioefficacy", "efficacy", "field trial", "experiment", "treatment", "population", "yield", "mortality"],
     },
     "review_synthesis": {
         "label": "review synthesis and source-mining support",
@@ -3273,21 +3307,6 @@ def style_evidence_text_from_analysis(analysis: dict[str, Any]) -> str:
     profile = analysis.get("selected_style_profile") or analysis.get("style_profile") or {}
     framework = analysis.get("discussion_framework") or {}
     parts: list[str] = []
-    if isinstance(profile, dict):
-        section_rules = profile.get("section_rules") or {}
-        parts.extend(
-            [
-                str(profile.get("author", "")),
-                str(profile.get("overall_style", "")),
-                str(profile.get("planning_profile", "")),
-                str(section_rules.get("discussion", "")),
-                str(section_rules.get("introduction", "")),
-                str(section_rules.get("methodology", "")),
-                " ".join(map(str, profile.get("signature_moves") or [])),
-                " ".join(map(str, profile.get("citation_style_rules") or [])),
-                " ".join(map(str, profile.get("style_compression_rules") or [])),
-            ]
-        )
     if isinstance(framework, dict):
         parts.extend(
             [
@@ -3296,6 +3315,18 @@ def style_evidence_text_from_analysis(analysis: dict[str, Any]) -> str:
                 json.dumps(framework.get("style_evidence_priorities") or [], ensure_ascii=True),
                 json.dumps(framework.get("paragraph_framework") or [], ensure_ascii=True),
                 json.dumps(framework.get("citation_strategy") or [], ensure_ascii=True),
+            ]
+        )
+    if isinstance(profile, dict):
+        section_rules = profile.get("section_rules") or {}
+        parts.extend(
+            [
+                str(profile.get("author", "")),
+                str(profile.get("overall_style", "")),
+                str(section_rules.get("discussion", "")),
+                str(section_rules.get("introduction", "")),
+                " ".join(map(str, profile.get("signature_moves") or [])),
+                " ".join(map(str, profile.get("citation_style_rules") or [])),
             ]
         )
     explicit = analysis.get("style_evidence_profile") or {}
@@ -3331,10 +3362,17 @@ def style_evidence_score_for_paper(
     paper: dict[str, Any],
     haystack: str,
     analysis: dict[str, Any],
+    scientific_relevance_score: float = 0.0,
+    specific_anchor_hits: int = 0,
+    objective_or_finding_hits: int = 0,
 ) -> tuple[float, str, list[str]]:
     needs = style_evidence_needs_from_analysis(analysis)
     if not needs:
         return 0.0, "no selected style profile", []
+    if specific_anchor_hits == 0 and objective_or_finding_hits < 2:
+        return 0.0, "style fit ignored because crop/pest/treatment anchor is weak", []
+    if scientific_relevance_score < 12:
+        return 0.0, "style fit ignored because scientific match is weak", []
     category = infer_paper_category(paper)
     source_text = str(paper.get("source") or "").lower()
     matched_labels: list[str] = []
@@ -3354,10 +3392,11 @@ def style_evidence_score_for_paper(
             raw_score += dim_score
             matched_labels.append(str(need.get("label", need["key"])))
     if category == "Research Article" and (doi_from_paper(paper) or int(paper.get("citation_count") or 0) > 0):
-        raw_score += 1.2
-    if "perplexity" in source_text and matched_labels:
         raw_score += 0.6
-    score = round(min(14.0, raw_score), 1)
+    if "perplexity" in source_text and matched_labels:
+        raw_score += 0.3
+    max_score = 5.0 if scientific_relevance_score >= 35 else 2.0
+    score = round(min(max_score, raw_score), 1)
     reason = ", ".join(dict.fromkeys(matched_labels)) if matched_labels else "no strong style-evidence match"
     return score, reason, matched_labels
 
@@ -3382,6 +3421,11 @@ def ranking_focus_context(context_text: str, analysis: dict[str, Any] | None = N
         *(profile.get("outcome_terms") or []),
         *(profile.get("must_include_terms") or []),
     ]
+    specific_anchor_terms = [
+        term
+        for term in ranking_terms(" ".join(map(str, [objective, focused, *anchors])), 45)
+        if term not in STYLE_ANCHOR_STOP_TERMS and len(term) >= 3
+    ]
     return {
         "objective_text": objective,
         "focused_text": focused,
@@ -3391,6 +3435,7 @@ def ranking_focus_context(context_text: str, analysis: dict[str, Any] | None = N
         "discussion_terms": ranking_terms(discussion_focus, 24),
         "context_terms": ranking_terms(context_text, 50),
         "bio_anchors": [str(anchor).strip().lower() for anchor in anchors if str(anchor or "").strip()],
+        "specific_anchor_terms": specific_anchor_terms,
         "style_evidence_needs": style_evidence_needs_from_analysis(analysis),
         "profile": profile,
     }
@@ -3456,6 +3501,7 @@ def score_paper_components(
     discussion_hits = term_overlap_count(focus["discussion_terms"], haystack)
     context_hits = term_overlap_count(focus["context_terms"], haystack)
     anchor_hits = term_overlap_count(focus["bio_anchors"], haystack)
+    specific_anchor_hits = term_overlap_count(focus["specific_anchor_terms"], haystack)
     result_hits = term_overlap_count(list(RANKING_RESULT_TERMS), haystack)
 
     objective_score = min(22, objective_hits * 5.5) if focus["objective_terms"] else 0
@@ -3463,6 +3509,7 @@ def score_paper_components(
     discussion_score = min(14, discussion_hits * 3.5) if focus["discussion_terms"] else 0
     biology_score = min(18, (anchor_hits * 4.0) + min(6, result_hits * 1.5))
     context_score = min(10, context_hits * 1.2)
+    scientific_relevance_score = objective_score + finding_score + discussion_score + biology_score
 
     year = paper.get("year")
     try:
@@ -3485,7 +3532,14 @@ def score_paper_components(
     source_score = 5 if any(src in str(paper.get("source", "")) for src in ["Semantic Scholar", "CORE", "OpenAlex", "Google Scholar", "Perplexity", "ResearchGate"]) else 2
     pdf_score, pdf_reason = rank_pdf_score(paper)
     doi_score = 2 if doi_from_paper(paper) else 0
-    style_score, style_reason, style_matches = style_evidence_score_for_paper(paper, haystack, analysis or {})
+    style_score, style_reason, style_matches = style_evidence_score_for_paper(
+        paper,
+        haystack,
+        analysis or {},
+        scientific_relevance_score=scientific_relevance_score,
+        specific_anchor_hits=specific_anchor_hits,
+        objective_or_finding_hits=objective_hits + finding_hits,
+    )
 
     penalty = 0
     title_query_text = f"{paper.get('title', '')} {paper.get('query', '')} {paper.get('found_query', '')}".lower()
@@ -3497,6 +3551,8 @@ def score_paper_components(
         penalty += 6
     if (focus["objective_terms"] or focus["focused_terms"]) and (objective_hits + finding_hits + anchor_hits) == 0:
         penalty += 10
+    if (focus["specific_anchor_terms"] and specific_anchor_hits == 0 and objective_hits + finding_hits == 0):
+        penalty += 18
 
     gemini_score = 0.0
     if include_gemini and paper.get("gemini_note"):
@@ -3546,6 +3602,7 @@ def score_paper_components(
         "discussion_focus_match": round(discussion_score, 1),
         "biology_match": round(biology_score, 1),
         "context_match": round(context_score, 1),
+        "specific_anchor_match": specific_anchor_hits,
         "pdf_score": round(pdf_score, 1),
         "style_fit_score": round(style_score, 1),
         "style_fit_reason": style_reason,
@@ -3602,7 +3659,8 @@ def rerank_papers_after_gemini(
         score, reason, components = score_paper_components(item, context_text, analysis, include_gemini=True)
         base_score = float(item.get("score") or 0)
         if item.get("gemini_note"):
-            score = round(min(100, (base_score * 0.45) + (score * 0.55)), 1)
+            gemini_weight = 0.45 if float(components.get("gemini_evidence_score") or 0) >= 10 else 0.3
+            score = round(min(100, (base_score * (1 - gemini_weight)) + (score * gemini_weight)), 1)
             reason = f"Gemini rerank: {reason}"
         apply_ranking_components(item, score, reason, components, "post_gemini" if item.get("gemini_note") else "pre_gemini")
         reranked.append(item)
@@ -3664,8 +3722,10 @@ Return JSON array. Each item must have paper_id, ai_score from 0 to 100, categor
 Do not reward papers whose only match is RBD, CRD, ANOVA, CD, SEm, DMRT, replication, or statistical design.
 Reward papers that explain treatment efficacy, pest reduction, yield improvement, dose response, biological activity,
 mode of action, crop/pest response, agreement/disagreement with previous results, or practical recommendation.
-Also reward papers whose evidence role fits the selected author-style Discussion framework, such as mechanism support,
-direct validation/contrast, field/practical implications, original primary citation support, or review source-mining.
+Use selected-author style fit only as a tie-breaker after scientific relevance is established. Never rank a paper high
+only because it fits a rhetorical style need. Style-fit evidence means mechanism support, direct validation/contrast,
+field/practical implications, original primary citation support, or review source-mining that also matches the objective,
+focused findings, crop/pest/treatment, or result direction.
 """
     try:
         text = chat_text(

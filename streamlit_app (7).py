@@ -1736,7 +1736,8 @@ with tabs[2]:
         with st.expander("How references are ranked", expanded=False):
             st.write(
                 "Ranking now prioritizes objective match, focused key-finding match, discussion-focus match, "
-                "crop/pest/treatment/outcome biology, selected-author style fit, PDF/readability, citations, year, and source quality. "
+                "crop/pest/treatment/outcome biology, PDF/readability, citations, year, and source quality. "
+                "Selected-author style fit is used only as a tie-breaker after scientific relevance is established. "
                 "Papers that only match statistical design terms such as RBD, CRD, ANOVA, CD, SEm, or DMRT are penalized."
             )
             st.write(
